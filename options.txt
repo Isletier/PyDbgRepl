@@ -1,0 +1,246 @@
+pydevd options reference
+========================
+Sources: pydevd_command_line_handling.py, pydevd_constants.py, pydevd_json_debug_options.py
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. COMMAND-LINE ARGUMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+With values (--name value):
+
+  --port N              Port to connect/listen on
+  --ppid N              Parent process PID (must differ from own PID)
+  --client HOST         IDE hostname to connect to (client mode)
+  --vm_type TYPE        VM type override (e.g. jython)
+  --access-token T      Auth token for IDE side
+  --client-access-token T  Auth token for client side
+  --debug-mode MODE     Debug mode (PydevdCustomization.DEBUG_MODE)
+  --preimport MODULE    Module to import before starting
+  --log-file PATH       Log file path (.<pid>.log suffix added automatically)
+  --log-level N         Log verbosity: 0=critical 1=info 2=debug 3=verbose
+  --qt-support[=MODE]   Qt event loop: auto | pyqt5 | pyqt4 | pyside | pyside2 | none
+
+Boolean flags (presence = True):
+
+  --server              Listen for connections instead of connecting to IDE
+  --multiproc           PyCharm multi-process mode (reuses SSH tunnel connection)
+  --multiprocess        PyDev multi-process mode (new connection per subprocess)
+  --save-signatures     Save method signatures
+  --save-threading      Save threading info
+  --save-asyncio        Save asyncio info
+  --print-in-debugger-startup   Print "pydev debugger: starting (pid: N)" to stderr
+  --cmd-line            After script finishes, keep debugger alive for interactive
+                        console (sends CMD_SHOW_CONSOLE, loops processing IDE commands).
+                        Essential for GDB-like "stay alive after exit" behavior.
+  --module              Run target as module (-m style)
+  --skip-notify-stdin   Don't send pydevdInputRequested events when debuggee reads stdin
+
+Protocol flags (mutually exclusive, pick one):
+
+  --json-dap-http       *** RECOMMENDED *** Standard DAP: Content-Length framing + JSON.
+                        Compatible with all DAP clients (VS Code, nvim-dap, etc.)
+  --json-dap            ptvsd compat: pydevd sends raw JSON without Content-Length.
+                        Fragile over real sockets. Avoid.
+  --protocol-quoted-line  Legacy Eclipse/PyDev XML protocol. Ignore.
+  --protocol-http         Legacy XML over HTTP framing. Ignore.
+
+Special:
+
+  --file PATH           Script to run. Must be last argument.
+  --DEBUG               Deprecated. Use --log-level=3.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. ENVIRONMENT VARIABLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Tracing backend:
+
+  PYDEVD_USE_SYS_MONITORING   bool  auto (True on Py 3.12+)
+      Use sys.monitoring instead of sys.settrace.
+
+  PYDEVD_USE_CYTHON           bool  auto
+      Force-enable or disable Cython extensions.
+
+  PYDEVD_USE_FRAME_EVAL       bool  auto
+      Force-enable or disable frame eval mode.
+
+Logging:
+
+  PYDEVD_DEBUG / PYDEV_DEBUG / PYCHARM_DEBUG   bool  False
+      Enable verbose debug logging (level 3).
+
+  PYDEVD_DEBUG_FILE           path  -
+      Log file path (pid appended automatically).
+
+  PYDEVD_LOG_TIME             bool  True
+      Include timestamps in log output.
+
+Gevent:
+
+  GEVENT_SUPPORT              bool  False
+      Enable gevent monkey-patch compatibility.
+
+  GEVENT_SHOW_PAUSED_GREENLETS  bool  False
+      Show paused greenlets as separate threads in IDE.
+
+  GEVENT_SUPPORT_NOT_SET_MSG  str   built-in
+      Custom message shown when gevent detected but GEVENT_SUPPORT not set.
+
+Native lib / misc:
+
+  PYDEVD_LOAD_NATIVE_LIB     str   auto
+      Control loading of native lib for thread tracing.
+
+  PYDEVD_DISABLE_FILE_VALIDATION  bool  False
+      Skip file existence/path validation.
+
+  PYDEVD_LOAD_VALUES_ASYNC   bool  False
+      Load variable values asynchronously.
+
+  PYDEVD_APPLY_PATCHING_TO_HIDE_PYDEVD_THREADS  bool  True
+      Patch threading to hide debugger's internal threads from user.
+
+  PYDEVD_SHOW_COMPILE_CYTHON_COMMAND_LINE  bool  False
+      Print the command to compile Cython extensions.
+
+Timeouts:
+
+  PYDEVD_WARN_SLOW_RESOLVE_TIMEOUT    float  0.5
+      Seconds before warning about slow attribute resolution.
+
+  PYDEVD_WARN_EVALUATION_TIMEOUT      float  3.0
+      Seconds before warning about slow expression evaluation.
+
+  PYDEVD_THREAD_DUMP_ON_WARN_EVALUATION_TIMEOUT  bool  False
+      Dump thread state when eval timeout warning fires.
+
+  PYDEVD_UNBLOCK_THREADS_TIMEOUT      float  -1.0
+      Seconds to wait before resuming all threads during eval
+      (multi_threads_single_notification mode only).
+      -1 = disabled, 0 = immediate resume.
+
+  PYDEVD_INTERRUPT_THREAD_TIMEOUT     float  -1
+      Seconds before interrupting a stuck eval thread. <=0 = disabled.
+
+Variable display:
+
+  PYDEVD_CONTAINER_INITIAL_EXPANDED_ITEMS  int  100
+      Items shown expanded before "more..." appears.
+
+  PYDEVD_CONTAINER_BUCKET_SIZE             int  1000
+      Size of each "more..." bucket.
+
+  PYDEVD_CONTAINER_RANDOM_ACCESS_MAX_ITEMS int  500
+      Max items shown for dicts/sets.
+
+  PYDEVD_CONTAINER_NUMPY_MAX_ITEMS         int  500
+      Max numpy array items shown.
+
+  PYDEVD_WARN_SLOW_RESOLVE_TIMEOUT         float  0.5
+      Warn when getting an attribute takes longer than this.
+
+Pandas:
+
+  PYDEVD_PANDAS_MAX_ROWS      int  60
+  PYDEVD_PANDAS_MAX_COLS      int  10
+  PYDEVD_PANDAS_MAX_COLWIDTH  int  50
+
+IPython:
+
+  PYDEVD_IPYTHON_COMPATIBLE_DEBUGGING  bool  False
+      Enable IPython-compatible debugging mode.
+
+  PYDEVD_IPYTHON_CONTEXT  str  "interactiveshell.py,run_code,run_ast_nodes"
+      Comma-separated filename,method1,method2 for IPython eval context detection.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. DAP DEBUG OPTIONS (launch/attach request body)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Source: _pydevd_bundle/pydevd_json_debug_options.py
+
+  justMyCode              bool  True
+      Skip stdlib/third-party frames during stepping.
+      (Legacy: debugStdLib=True is inverse of this)
+
+  redirectOutput          bool  False
+      Capture debuggee stdout/stderr and send as DAP output events.
+      When False: output goes directly to the terminal (recommended for CLI).
+      When True:  output comes as DAP output events, nothing reaches terminal.
+
+  showReturnValue         bool  False
+      Show function return values in locals panel.
+
+  breakOnSystemExitZero   bool  False
+      Break on SystemExit(0) in addition to non-zero exits.
+
+  django                  bool  False
+      Enable Django template debugging.
+
+  flask / jinja           bool  False
+      Enable Flask/Jinja2 template debugging.
+
+  stopOnEntry             bool  False
+      Break at first line of user code on launch.
+      Note: suppress for auto-spawned subprocesses.
+
+  maxExceptionStackFrames int   0
+      Limit stack frames shown on exception. 0 = unlimited.
+
+  guiEventLoop            str   "matplotlib"
+      GUI event loop integration. e.g. "matplotlib", "PyQt5", "PyQt6", "wx".
+
+  clientOS                str   -
+      Client OS for path normalization: "WINDOWS" or "UNIX".
+
+Legacy debug options string (semicolon-separated KEY=VALUE):
+
+  WAIT_ON_NORMAL_EXIT=True
+  WAIT_ON_ABNORMAL_EXIT=True
+  BREAK_SYSTEMEXIT_ZERO=True
+  REDIRECT_OUTPUT=True
+  DJANGO_DEBUG=True
+  FLASK_DEBUG=True
+  FIX_FILE_PATH_CASE=True       (Windows path case normalization)
+  CLIENT_OS_TYPE=WINDOWS|UNIX
+  DEBUG_STDLIB=True             (inverse of justMyCode)
+  STOP_ON_ENTRY=True
+  SHOW_RETURN_VALUE=True
+  MULTIPROCESS=True
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. SUBPROCESS PROPAGATION (multiprocess debug mode)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Source: _pydev_bundle/pydev_monkey.py:46 (_get_setup_updated_with_protocol_and_ppid)
+        _pydev_bundle/pydev_monkey.py:564 (skip_names)
+
+FILTER — drop, never forward to child:
+  --file        child has its own target script
+  --module      same
+  --cmd-line    don't want every child stuck in console mode
+
+TRANSFORM — re-derive, don't copy blindly:
+  --ppid              set to os.getpid() of spawning process (keep as-is for exec())
+  protocol flags      drop all, re-emit from get_protocol() at runtime
+  --log-file          re-apply from DebugInfoHolder.PYDEVD_DEBUG_FILE
+  --log-level         re-apply from DebugInfoHolder.DEBUG_TRACE_LEVEL
+  --debug-mode        re-apply from PydevdCustomization.DEBUG_MODE
+  --preimport         re-apply from PydevdCustomization.PREIMPORT
+
+MIRROR — forward unchanged:
+  --port, --client
+  --access-token, --client-access-token
+  --server, --multiproc, --multiprocess
+  --vm_type, --qt-support
+  --save-signatures, --save-threading, --save-asyncio
+  --print-in-debugger-startup, --skip-notify-stdin
+
+ENV VARS — inherited automatically by child via OS (no explicit propagation needed):
+  GEVENT_SUPPORT, PYDEVD_USE_CYTHON, PYDEVD_USE_FRAME_EVAL, PYDEVD_USE_SYS_MONITORING
+
+

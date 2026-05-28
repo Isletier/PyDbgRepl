@@ -102,7 +102,7 @@ class DebugSession:
             "--json-dap-http",
             "--file", script_path,
         ]
-        return subprocess.Popen(cmd)
+        return subprocess.Popen(cmd, start_new_session=True)
 
     def _dap_handshake(self, script_path: str):
         self._dap.request("initialize", {
