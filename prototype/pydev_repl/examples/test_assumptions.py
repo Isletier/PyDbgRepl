@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-PYTHON = os.path.join(os.path.dirname(sys.executable), "python")
+PYTHON = os.path.join(os.path.dirname(sys.executable), "python3")
 if not os.path.exists(PYTHON):
     PYTHON = sys.executable
 

@@ -36,12 +36,12 @@ class QtSupport(enum.Enum):
 OBLIGATORY_RUN_ARGUMENTS = [
     "--server",
     "--json-dap-http",
-    "--cmd-line",
     "--skip-notify-stdin",
 ]
 
 SANITIZE_RUN_ARGUMENTS = [
     "--client",
+    "--cmd-line",
     "--access-token",
     "--debug-mode",
     "--multiproc",

@@ -21,6 +21,7 @@ class SessionState:
     process: launch.LaunchedProcess | None = None
     reader_thread: threading.Thread | None = None
     dap: DAPClient | None = None
+    running: bool = False
     current_thread_id: int | None = None
     current_frame_id: int | None = None
     breakpoints: dict[str, list[dict]] = dataclasses.field(default_factory=dict)

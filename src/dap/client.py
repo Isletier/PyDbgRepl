@@ -5,6 +5,7 @@ Covers the v1 request/event subset documented in reference/dap_scope.md.
 import json
 import queue
 import threading
+from typing import Callable
 
 from .transport import DAPTransport
 
@@ -21,6 +22,8 @@ class DAPClient:
         self._pending: dict[int, tuple[threading.Event, dict]] = {}
         self._pending_lock = threading.Lock()
         self.events: queue.Queue[dict] = queue.Queue()
+        self.on_event: Callable[[dict], None] | None = None
+        self.on_disconnect: Callable[[], None] | None = None
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._reader_thread.start()
 
@@ -51,7 +54,11 @@ class DAPClient:
                 self._handle_response(message)
             elif message.get("type") == "event":
                 self.events.put(message)
+                if self.on_event is not None:
+                    self.on_event(message)
             # adapter->client reverse requests are out of scope for v1
+        if self.on_disconnect is not None:
+            self.on_disconnect()
 
     def _handle_response(self, message: dict) -> None:
         with self._pending_lock:
