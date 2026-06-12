@@ -12,5 +12,8 @@ dependencies = [
     "prompt-toolkit>=3.0",
 ]
 
+[project.optional-dependencies]
+ptpython = ["ptpython>=3.0"]
+
 [tool.setuptools]
 packages = ["src"]

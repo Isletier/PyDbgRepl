@@ -12,6 +12,9 @@ class ReplOptions:
     """Options for pydev-repl itself."""
 
     dap_host: str = "127.0.0.1"
+    # REPL frontend: "auto" (ptpython if installed, else plain readline),
+    # "ptpython", or "readline".
+    ui: str = "auto"
 
 
 @dataclasses.dataclass
@@ -25,7 +28,11 @@ class SessionState:
     current_thread_id: int | None = None
     current_frame_id: int | None = None
     breakpoints: dict[str, list[dict]] = dataclasses.field(default_factory=dict)
+    function_breakpoints: list[dict] = dataclasses.field(default_factory=list)
+    temporary_breakpoints: set[tuple[str, int]] = dataclasses.field(default_factory=set)
     exception_filters: list[str] = dataclasses.field(default_factory=list)
+    displays: list[dict] = dataclasses.field(default_factory=list)
+    ptpython_active: bool = False
 
 
 SESSION = SessionState()

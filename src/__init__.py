@@ -14,6 +14,8 @@ start_eval() injects the REPL commands into __main__ and returns; the wrapper
 script's shebang runs python with -i so the standard interactive prompt (with
 readline/tab-completion bound to __main__) takes over afterwards.
 """
+from __future__ import annotations
+
 import os
 import signal
 import sys
@@ -49,11 +51,61 @@ def _sigint_handler(signum, frame) -> None:
     """gdb-style Ctrl+C: pause a running debuggee, otherwise cancel the current input."""
     if SESSION.dap is not None and SESSION.running and SESSION.current_thread_id is not None:
         try:
-            SESSION.dap.pause(SESSION.current_thread_id)
+            _commands.interrupt()
         except _dap.DAPError:
             pass
         return
     signal.default_int_handler(signum, frame)
+
+
+def _ptpython_enabled() -> bool:
+    ui = SESSION.options.ui
+    if ui == "readline":
+        return False
+    try:
+        import ptpython  # noqa: F401
+    except ImportError:
+        if ui == "ptpython":
+            print("error: ui='ptpython' requested but ptpython is not installed")
+        return False
+    return True
+
+
+class _PydevPromptStyle:
+    """ptpython PromptStyle showing the session state, e.g. "(paused) >>> "."""
+
+    def in_prompt(self):
+        if SESSION.dap is None:
+            status = "disconnected"
+        elif SESSION.running:
+            status = "running"
+        else:
+            status = "paused"
+        return [("class:pygments.comment", f"({status}) "), ("class:prompt", ">>> ")]
+
+    def in2_prompt(self, width: int):
+        return [("class:prompt.dots", "...".rjust(width))]
+
+    def out_prompt(self):
+        return []
+
+
+def _configure_ptpython(repl) -> None:
+    repl.all_prompt_styles["pydev"] = _PydevPromptStyle()
+    repl.prompt_style = "pydev"
+
+
+def _embed_ptpython() -> None:
+    from ptpython.repl import embed
+
+    import __main__
+    SESSION.ptpython_active = True
+    embed(
+        globals=vars(__main__),
+        locals=vars(__main__),
+        configure=_configure_ptpython,
+        patch_stdout=True,
+    )
 
 
 def start_eval() -> None:
@@ -61,6 +113,8 @@ def start_eval() -> None:
 
     Injects the commands into __main__ so that `python -i repl.py` drops into
     a normal interactive prompt (full readline/tab-completion) with them in scope.
+    If ptpython is enabled (see the "ui" option), it replaces that prompt
+    entirely instead.
     """
     signal.signal(signal.SIGINT, _sigint_handler)
 
@@ -70,3 +124,7 @@ def start_eval() -> None:
     import __main__
     for name in _commands_all:
         setattr(__main__, name, getattr(_commands, name))
+
+    if _ptpython_enabled():
+        _embed_ptpython()
+        os._exit(0)
