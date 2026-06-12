@@ -81,7 +81,7 @@ def _end_session() -> None:
     _clear_dap_state()
 
 
-# ---- stdin passthrough (see reference/io_model.md) ----
+# ---- stdin passthrough (see doc/io_model.md) ----
 
 class _StdinPassthrough:
     """Forward our stdin to the inferior's pty while a blocking resume call is in flight.
@@ -100,8 +100,14 @@ class _StdinPassthrough:
     def start(self) -> None:
         if not sys.stdin.isatty():
             return
-        self._old_settings = termios.tcgetattr(0)
-        tty.setcbreak(0)
+        try:
+            self._old_settings = termios.tcgetattr(0)
+            tty.setcbreak(0)
+        except termios.error:
+            # isatty() can be true for devices tcgetattr/setcbreak don't
+            # support; fall back to no passthrough rather than crash.
+            self._old_settings = None
+            return
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -134,32 +140,6 @@ class _StdinPassthrough:
             termios.tcsetattr(0, termios.TCSADRAIN, self._old_settings)
 
 
-def _on_input_requested(message: dict) -> None:
-    """`client.on_event` handler, scoped to the passthrough window.
-
-    Tells the user when their forwarded keystrokes are actually being
-    consumed by the inferior's stdin reads, as opposed to just sitting in
-    the pty buffer.
-
-    Caveat (see reference/io_model.md): pydevd's installed version sends
-    `pydevdInputRequested` with an empty body -- the documented `started`
-    field is never populated -- so this falls back to toggling on each
-    event. Also, CPython's input() bypasses sys.stdin (and this event)
-    entirely when stdin/stdout are both ttys, which is true for both our
-    default PTY-pair mode and --pty; only direct sys.stdin.read()/readline()
-    (or getpass) in the inferior trigger it.
-    """
-    if message.get("event") != "pydevdInputRequested":
-        return
-    body = message.get("body") or {}
-    started = body["started"] if "started" in body else not SESSION.awaiting_input
-    SESSION.awaiting_input = started
-    if started:
-        _async_print("--- debuggee is waiting for input ---")
-    else:
-        _async_print("--- input received, resuming ---")
-
-
 # ---- blocking resume + event handling ----
 
 _RESUME_RESULT_EVENTS = {"stopped", "exited", "terminated", "_disconnected"}
@@ -170,22 +150,18 @@ def _wait_for_resume_result(client: _dap.DAPClient) -> None:
 
     While blocked, forwards our stdin to the inferior's pty (default mode
     only -- not under --pty, and not for connect()-only sessions where we
-    hold no fd to the debuggee's stdio). See reference/io_model.md.
+    hold no fd to the debuggee's stdio). See doc/io_model.md.
     """
     passthrough = None
-    old_on_event = client.on_event
     if SESSION.process is not None and SESSION.process.master_fd is not None:
         passthrough = _StdinPassthrough(SESSION.process.master_fd)
         passthrough.start()
-        client.on_event = _on_input_requested
 
     try:
         message = client.wait_for_any_event(_RESUME_RESULT_EVENTS)
     finally:
         if passthrough is not None:
-            client.on_event = old_on_event
             passthrough.stop()
-            SESSION.awaiting_input = False
 
     event = message["event"]
     body = message["body"]

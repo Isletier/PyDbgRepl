@@ -138,7 +138,7 @@ single `int` (and no `path=`/`line=` kwargs), it's treated as
 
 Cost: small — a helper function plus a couple of `isinstance(..., int)`
 checks at the top of `breakpoint()`/`clear()`. Worth documenting as an
-overload in `reference/command_reference.md` once implemented.
+overload in `doc/command_reference.md` once implemented.
 
 
 ## Out of scope for this pass (phase 2)

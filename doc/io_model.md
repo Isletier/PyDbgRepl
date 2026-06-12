@@ -53,8 +53,8 @@ might call `input()` and where forwarding our stdin makes sense — and exactly
 when our own `input()`-based prompt loop is *not* running, so there's no
 contention for stdin.
 
-Plan: `_wait_for_resume_result()` starts a passthrough thread before blocking
-on `wait_for_any_event(...)` and stops it when that returns:
+Implemented: `_wait_for_resume_result()` starts a passthrough thread before
+blocking on `wait_for_any_event(...)` and stops it when that returns:
 
 - **stdin -> master_fd**: read raw bytes from `sys.stdin.fileno()`, write to
   `master_fd`.
@@ -95,75 +95,66 @@ Restore the previous `termios` settings (cooked mode, with our own readline
 prompt) when the passthrough thread stops, before returning control to the
 REPL loop.
 
-### Prompt switching
+`_StdinPassthrough.start()` guards `tcgetattr`/`setcbreak` with
+`termios.error` (in addition to the `isatty()` check): some fds report
+`isatty() == True` but don't support these ioctls. On that error it falls
+back to no passthrough for this call, same as the non-tty case — better than
+crashing the whole resume call over a cosmetic feature.
 
-`_PydevPromptStyle` (ptpython) already renders `(running)` vs `(paused)`.
-Plain readline mode has no live prompt during a blocking call anyway (the
-call hasn't returned), so there's nothing to redraw — the `(running)`/
-`(paused)` distinction in ptpython is sufficient and no separate "inferior
-has the terminal" indicator is needed beyond that.
+### Prompt switching and "is the inferior reading my input?" — rejected
 
-### Indicating "the inferior is reading your input" via `pydevdInputRequested`
+`_PydevPromptStyle` (ptpython) has branches for `(running)` and `(paused)`;
+`(disconnected)` covers the rest. There is **no `(inferior input)` state** —
+an earlier draft of this design had one, gated on a `SESSION.awaiting_input`
+flag toggled by pydevd's `pydevdInputRequested` event. Both the flag and the
+prompt branch were **removed** after live testing (see "Why no stdin-state
+indicator" below). Plain readline mode has no live prompt during a blocking
+call anyway (the call hasn't returned), so there was never anything to redraw
+there either.
 
-Even with the passthrough thread running, the user has no way to tell *when*
-their keystrokes are actually going to the debuggee vs. just being buffered
-for nothing (the inferior may be mid-computation, not at an `input()` call
-yet). pydevd's `pydevdInputRequested` event (`started: bool`) fires exactly
-when the debuggee enters/leaves `sys.stdin.read()`/`readline()` —
-[[project_pty_io_forwarding]] previously dismissed this event as useless
-*for delivering input* (correct — it carries no data, passthrough is still
-required), but it's exactly the right signal for a **UI indicator**, which is
-a separate concern:
+The net result: while a passthrough-backed resume call is in flight, there is
+**no UI indicator** for "the inferior is currently blocked in `input()`".
+Typed bytes simply go to `master_fd` continuously, and the inferior consumes
+them whenever it gets around to reading stdin — exactly as if you'd run the
+script directly in a terminal and were watching its output to know when to
+type. This is intentional, not a missing feature; see below.
 
-- On `pydevdInputRequested(started=true)`: print a one-line marker via
-  `_async_print`, e.g. `"--- debuggee is waiting for input ---"`, so the user
-  knows the next keystrokes go to the inferior's `input()`, not to a buffered
-  pydev-repl command.
-- On `pydevdInputRequested(started=false)`: print a matching close, e.g.
-  `"--- input received, resuming ---"`.
-- In ptpython mode, additionally flip `_PydevPromptStyle` to a third state
-  (e.g. `"(inferior input)"`) for the duration, reverting on `started=false`
-  or whenever the passthrough thread stops (whichever comes first — the
-  debuggee could also be killed/interrupted mid-`input()`).
+### Why no stdin-state indicator: `pydevdInputRequested` doesn't work
 
-This requires `client.on_event` to be wired up for the duration of the
-passthrough thread (it's otherwise unused, per the dap_scope.md review) —
-scope the handler narrowly to `pydevdInputRequested` so it doesn't interact
-with the `wait_for_any_event`/deferred-queue mechanism used for
-`stopped`/`exited`/`terminated`.
+pydevd's `pydevdInputRequested` event (`started: bool`) looked like the
+obvious signal to drive a `(inferior input)` prompt / `"--- debuggee is
+waiting for input ---"` marker. It was implemented and tested live, then
+**removed entirely** — it is not just limited, it is actively misleading:
 
-Not applicable to `--pty <device>` mode (no passthrough thread, no ambiguity
-about where keystrokes go) or to `connect()` (event not observable without
-`output`/general event wiring, and there's no stdin path regardless).
+- Live testing showed the event arriving **after** the debuggee's output had
+  already been printed and `readline()` had already returned — i.e. the
+  marker appeared *after* the moment it claimed to describe, right before
+  `*** program terminated`. Observed latency was 2+ seconds from when the
+  debuggee actually entered `readline()`.
+- **`input()` does not trigger this event at all when stdin/stdout are both
+  ttys** (the common case in both default mode and `--pty <device>`).
+  CPython's `input()` bypasses `sys.stdin` via `PyOS_Readline` (a direct fd
+  read) whenever `isatty()` is true on both streams, so pydevd's wrapped
+  `sys.stdin` — which is what emits the event — is never invoked.
+- The installed pydevd's JSON `make_input_requested_message` sends `body: {}`
+  for both "started" and "finished" — the documented `started: bool` field is
+  never populated, so even the toggle-based workaround was guessing.
 
-**Verified caveats (real limitations, not just theoretical)**:
+Given all three, an indicator built on this event would be wrong far more
+often than right. The fallback — relying on the passthrough being
+continuously active and the user watching live output, `expect`-style (see
+`doc/references.md`) — is what gdb/`tmux`/`expect` all do anyway, and is what
+pydev-repl now does too. `--skip-notify-stdin` is now in
+`OBLIGATORY_RUN_ARGUMENTS` — moot either way since nothing listens for
+`pydevdInputRequested`, but suppressing it at the source avoids paying for an
+event we'll never use.
 
-- `pydevdInputRequested` is gated behind pydevd's `--skip-notify-stdin` flag
-  (`patch_stdin()` is skipped if set). It was previously in
-  `OBLIGATORY_RUN_ARGUMENTS` (always passed), which silenced the event
-  entirely — **removed** so `patch_stdin()` runs (its default, `skip-notify-
-  stdin=False`, is what we want).
-- Even with `patch_stdin()` active, **`input()` does not trigger this event
-  when stdin/stdout are both ttys** — true for both our default mode and
-  `--pty <device>`. CPython's `input()` builtin bypasses `sys.stdin` entirely
-  via `PyOS_Readline` (reading the fd directly) whenever `isatty()` is true
-  on both streams, so pydevd's `sys.stdin` wrapper (which is what emits the
-  event) is never invoked. **In practice this means the indicator will not
-  fire for the common case of a script calling `input()`.**
-- It *does* fire for an inferior calling `sys.stdin.read()`/`readline()` or
-  `getpass.getpass()` directly (these go through pydevd's wrapped
-  `sys.stdin`, regardless of tty-ness).
-- The installed pydevd's JSON `make_input_requested_message` sends `body:
-  {}` for both the "started" and "finished" notifications — the documented
-  `started: bool` field is never populated. `_on_input_requested` falls back
-  to toggling `SESSION.awaiting_input` on each occurrence (using `started`
-  from the body if a future pydevd version actually sends it).
-
-Net effect: this is implemented as a low-cost best-effort indicator for the
-narrower `sys.stdin.readline()`/`getpass` case, but is **not** a general
-solution to "tell me when `input()` is waiting" — for plain `input()` over a
-pty, the only feedback the user has is the passthrough itself being active
-(no special prompt/marker).
+`_async_print` (used for async notifications like `"*** connection to pydevd
+lost"`) needed no special-casing for this — it already has a
+`SESSION.ptpython_active` branch (plain `print(message)`, ptpython's
+`patch_stdout=True` handles redraw) and a plain-readline branch (clear line,
+print, redraw `prompt + line_buffer`). Neither branch is exercised during the
+passthrough window since there's nothing left that prints through it there.
 
 ### Job control and TUI/curses limitations of default mode
 
@@ -230,14 +221,16 @@ undesirable even momentarily — e.g. the debuggee is a TUI, or prints enough
 that interleaving with `*** stopped ...` notifications is confusing.
 
 **Usage**: in another terminal, run `tty` to get its device path (e.g.
-`/dev/pts/7`), leave that terminal otherwise idle, then:
+`/dev/pts/7`), leave that terminal otherwise idle, then either:
 
 ```python
 debug.set("pty", "/dev/pts/7")
 debug.run("script.py")
 ```
 
-or `--pty /dev/pts/7` on the command line.
+or pass `--pty /dev/pts/7` on the pydev-repl command line (before `--file`,
+like `--port`/`--log_level`/etc.) — it's parsed into `ArgsOptions.pty`
+(`run_ctx.args_opt.pty`), the same field `set("pty", ...)` targets.
 
 **Implementation** (`spawn_pydevd`): if `pty` is set, `os.open(path,
 os.O_RDWR)` and pass that single fd as the child's stdin **and** stdout
@@ -270,6 +263,12 @@ also redirects all three).
   mode there is exactly as if the inferior had been run directly in that
   terminal — none of the default-mode limitations above apply.
 
+**TODO: verify with a real TUI/curses target.** The above (job control,
+resize, curses) is reasoned from `setsid()`/controlling-terminal semantics,
+not yet confirmed against an actual curses program run with `--pty
+/dev/pts/N`. Only the default pty-pair + line-based case has a `samples/`
+smoke test so far (`samples/io_passthrough_demo.py`).
+
 **Caveats** (same as gdb's `tty`):
 
 - The target device must not have another foreground process reading from it
@@ -295,12 +294,14 @@ No `SESSION.process`, no fd of any kind to the debuggee's stdio — this is
 fundamental, not a missing feature:
 
 - **stdout/stderr**: pydevd can optionally be made to emit DAP `output`
-  events (§3/§6 of `dap_scope.md`) carrying captured stdout/stderr text. This
-  would be the *only* way to see remote inferior output through pydev-repl
-  itself. Not currently wired up (`client.on_event` unused — see the
-  follow-up note in the dap_scope.md review). Low priority: usually the
-  remote debuggee's output is already visible wherever it was launched
-  (its own terminal/log).
+  events (§3/§6 of `dap_scope.md`) carrying captured stdout/stderr text —
+  technically the only way to see remote inferior output through pydev-repl
+  itself. **Deliberately not pursued.** stdin is fundamentally not possible
+  for `connect()` (see below), so wiring up `output` events would give a
+  read-only half of the I/O model — and the remote debuggee's output is
+  already visible wherever it was launched (its own terminal/log, reachable
+  via a second `ssh` session to that machine). Adding a one-way output stream
+  here wouldn't change what's actually needed to interact with the process.
 - **stdin**: there is no DAP request that delivers stdin to the debuggee.
   `pydevdInputRequested` is purely a notification (`started=true/false`).
   **Not possible**, by design of the protocol — not a gap pydev-repl can
@@ -317,4 +318,4 @@ no local process to attach a device to.
 |---|---|---|---|---|---|
 | `run()`, default (no `--pty`) | `master_fd -> our stdout`, continuous bg thread | `our stdin -> master_fd`, scoped to blocking resume calls | yes, started/stopped per resume call | `cbreak` (ISIG kept) during passthrough | none — no Ctrl+Z, no resize propagation, curses clashes with our screen |
 | `run()`, `--pty <device>` | direct to external tty | direct to external tty | none | none — our terminal untouched | full — separate controlling terminal, Ctrl+Z/resize/curses all work natively |
-| `connect()` | not visible (or via `output` events, future work) | not possible | none | none | n/a |
+| `connect()` | not visible (not pursued — no point without stdin) | not possible | none | none | n/a |

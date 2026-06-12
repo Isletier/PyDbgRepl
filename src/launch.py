@@ -3,9 +3,14 @@ import dataclasses
 import enum
 import os
 import pty
+import random
 import subprocess
 import types
 import typing
+
+
+def _random_port() -> int:
+    return random.randint(20000, 65000)
 
 
 class LaunchError(Exception):
@@ -36,6 +41,7 @@ class QtSupport(enum.Enum):
 OBLIGATORY_RUN_ARGUMENTS = [
     "--server",
     "--json-dap-http",
+    "--skip-notify-stdin",
 ]
 
 SANITIZE_RUN_ARGUMENTS = [
@@ -66,7 +72,7 @@ ENV_SANITIZE = [
 
 @dataclasses.dataclass
 class ArgsOptions:
-    port: int = 0
+    port: int = dataclasses.field(default_factory=_random_port)
     ppid: int = 0
     vm_type: VmType | None = None
     preimport: str | None = None
@@ -76,6 +82,11 @@ class ArgsOptions:
     startup_msg: bool = False
     module: bool = False
     file: str | None = None
+    # External tty device (e.g. "/dev/pts/7") to redirect the inferior's
+    # stdin/stdout/stderr to, gdb `tty`-style. None: default owned-PTY-pair
+    # passthrough. Consulted by run(); a no-op for connect(). See
+    # doc/io_model.md.
+    pty: str | None = None
 
 
 @dataclasses.dataclass
@@ -181,7 +192,10 @@ def serialize_launch_args(run_ctx: RunContext, args: list[str]) -> list[str]:
     if flag == "--module":
         run_ctx.args_opt.module = True
         return args[1:]
-    return args[1:]
+    if flag == "--pty":
+        run_ctx.args_opt.pty = value()
+        return args[2:]
+    raise LaunchError(f"unknown flag: {flag}")
 
 
 def process_args(run_ctx: RunContext, argv: list[str]) -> None:
@@ -307,7 +321,7 @@ class LaunchedProcess:
     child: subprocess.Popen
     # None when `pty_device` was given: the inferior's stdio is redirected
     # straight to that external tty and there is nothing on our side to
-    # stream from (see reference/io_model.md).
+    # stream from (see doc/io_model.md).
     master_fd: int | None
 
 

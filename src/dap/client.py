@@ -1,6 +1,6 @@
 """DAP client: request/response correlation and event dispatch over DAPTransport.
 
-Covers the v1 request/event subset documented in reference/dap_scope.md.
+Covers the v1 request/event subset documented in doc/dap_scope.md.
 """
 import json
 import queue

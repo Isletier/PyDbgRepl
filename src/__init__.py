@@ -77,8 +77,6 @@ class _PydevPromptStyle:
     def in_prompt(self):
         if SESSION.dap is None:
             status = "disconnected"
-        elif SESSION.awaiting_input:
-            status = "inferior input"
         elif SESSION.running:
             status = "running"
         else:

@@ -35,7 +35,7 @@ def run(script: str | None = None, *args: str) -> None:
         print("error: no script given (pass one to run(), or --file at startup)")
         return
 
-    SESSION.process = _launch.spawn_pydevd(run_ctx, SESSION.options.pty)
+    SESSION.process = _launch.spawn_pydevd(run_ctx, run_ctx.args_opt.pty)
     print(f"launched pid={SESSION.process.child.pid}")
 
     if SESSION.process.master_fd is not None:

@@ -15,10 +15,6 @@ class ReplOptions:
     # REPL frontend: "auto" (ptpython if installed, else plain readline),
     # "ptpython", or "readline".
     ui: str = "auto"
-    # External tty device (e.g. "/dev/pts/7") to redirect the inferior's
-    # stdin/stdout/stderr to, gdb `tty`-style. None: default owned-PTY-pair
-    # passthrough. Consulted by run(); a no-op for connect().
-    pty: str | None = None
 
 
 @dataclasses.dataclass
@@ -37,9 +33,6 @@ class SessionState:
     exception_filters: list[str] = dataclasses.field(default_factory=list)
     displays: list[dict] = dataclasses.field(default_factory=list)
     ptpython_active: bool = False
-    # True while a pydevdInputRequested(started=true) event is outstanding
-    # during the stdin passthrough window (see reference/io_model.md).
-    awaiting_input: bool = False
 
 
 SESSION = SessionState()

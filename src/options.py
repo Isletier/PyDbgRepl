@@ -76,7 +76,11 @@ def unset_option(name: str) -> Any:
     group = _find_group(name)
     if group is None:
         raise KeyError(name)
-    default = _field_for(group.target, name).default
+    f = _field_for(group.target, name)
+    if f.default_factory is not dataclasses.MISSING:
+        default = f.default_factory()
+    else:
+        default = f.default
     setattr(group.target, name, default)
     return default
 

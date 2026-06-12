@@ -4,7 +4,7 @@ Complete list of pydev-repl's command surface: what's implemented today,
 what's planned, and what's out of reach given pydevd's DAP support — mapped
 against the two reference debuggers, **pdb** (Python's own) and **gdb**
 (the CLI UX model this REPL follows, per
-[[project_sync_execution_model]]/`reference/repl_execution_model.md`).
+[[project_sync_execution_model]]/`doc/repl_execution_model.md`).
 
 Every command is a plain Python function injected into `__main__` by
 `start_eval()` (see `src/commands.py`). There is no separate command-line
@@ -13,9 +13,9 @@ parser/grammar — arguments are normal Python call arguments, e.g.
 
 Columns: **pdb** / **gdb** give the closest equivalent command(s) for
 orientation. **DAP** gives the backing request(s) (from
-`reference/dap_scope.md`). **Completion** previews what tab-completion would
+`doc/dap_scope.md`). **Completion** previews what tab-completion would
 offer for each argument in `"debugger"` mode, per
-[[project_completion_design]]/`reference/completion_design.md` — not yet
+[[project_completion_design]]/`doc/completion_design.md` — not yet
 implemented, but the signatures below are written with it in mind.
 **Status**: `done`, `planned`, or `n/a` (not feasible / not worth it, with
 reason).
@@ -135,7 +135,7 @@ All of these now **block** until the program stops/exits — see
 
 ## Out of scope (pydevd has no support at all)
 
-From `reference/dap_scope.md` §8 — no point modeling these as commands:
+From `doc/dap_scope.md` §8 — no point modeling these as commands:
 
 - Memory/disassembly: `x` (gdb examine), `disassemble`, `readMemory`/`writeMemory` — `supportsDisassembleRequest=False`, `supportsReadMemoryRequest=False`.
 - `restart`/`restartFrame` as a *protocol* feature — `supportsRestartRequest=False` (but see `restart()` above — emulable via `stop()`+`run()`).
