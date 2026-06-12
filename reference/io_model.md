@@ -136,6 +136,92 @@ Not applicable to `--pty <device>` mode (no passthrough thread, no ambiguity
 about where keystrokes go) or to `connect()` (event not observable without
 `output`/general event wiring, and there's no stdin path regardless).
 
+**Verified caveats (real limitations, not just theoretical)**:
+
+- `pydevdInputRequested` is gated behind pydevd's `--skip-notify-stdin` flag
+  (`patch_stdin()` is skipped if set). It was previously in
+  `OBLIGATORY_RUN_ARGUMENTS` (always passed), which silenced the event
+  entirely — **removed** so `patch_stdin()` runs (its default, `skip-notify-
+  stdin=False`, is what we want).
+- Even with `patch_stdin()` active, **`input()` does not trigger this event
+  when stdin/stdout are both ttys** — true for both our default mode and
+  `--pty <device>`. CPython's `input()` builtin bypasses `sys.stdin` entirely
+  via `PyOS_Readline` (reading the fd directly) whenever `isatty()` is true
+  on both streams, so pydevd's `sys.stdin` wrapper (which is what emits the
+  event) is never invoked. **In practice this means the indicator will not
+  fire for the common case of a script calling `input()`.**
+- It *does* fire for an inferior calling `sys.stdin.read()`/`readline()` or
+  `getpass.getpass()` directly (these go through pydevd's wrapped
+  `sys.stdin`, regardless of tty-ness).
+- The installed pydevd's JSON `make_input_requested_message` sends `body:
+  {}` for both the "started" and "finished" notifications — the documented
+  `started: bool` field is never populated. `_on_input_requested` falls back
+  to toggling `SESSION.awaiting_input` on each occurrence (using `started`
+  from the body if a future pydevd version actually sends it).
+
+Net effect: this is implemented as a low-cost best-effort indicator for the
+narrower `sys.stdin.readline()`/`getpass` case, but is **not** a general
+solution to "tell me when `input()` is waiting" — for plain `input()` over a
+pty, the only feedback the user has is the passthrough itself being active
+(no special prompt/marker).
+
+### Job control and TUI/curses limitations of default mode
+
+The default mode gives the inferior its *own* pty, separate from ours, with
+only raw bytes shuttled between the two. This has two real, user-visible
+consequences — not edge cases, but everyday limitations worth knowing about:
+
+- **No job control for the inferior.** Ctrl+Z does not suspend it (there is
+  no `SIGTSTP` path to the inferior's pty — Ctrl+Z, like every other key,
+  only has special meaning on *our* tty, where `ISIG` maps it to whatever our
+  terminal driver does with *us*, not the inferior). Likewise, resizing your
+  terminal window does **not** propagate: the inferior's pty keeps whatever
+  size it was created with (`pty.openpty()`'s default, generally inherited
+  from ours at spawn time but never updated afterwards), so `SIGWINCH` /
+  `TIOCGWINSZ` are stale for the lifetime of the session.
+- **Curses/raw-mode TUI applications will visually clash with pydev-repl's
+  own output.** `_stream_output` copies the inferior's pty bytes verbatim to
+  our stdout — including ANSI escape sequences for cursor positioning,
+  alternate-screen-buffer switches, etc. Our terminal interprets those
+  sequences as applying to *our* screen (where the REPL prompt lives), not
+  some isolated sub-region. A curses app and pydev-repl's prompt are fighting
+  over the same physical screen with no coordination. **There is no fix for
+  this within default mode** — it's an inherent consequence of multiplexing
+  two ttys' output onto one physical terminal via raw byte copying.
+
+**`--pty <device>` is the answer to both**, and is the recommended (only
+sane) way to debug a TUI/curses application or anything that needs real job
+control — see below. This isn't a workaround so much as the correct tool:
+gdb users reach for `tty`/`inferior-tty` for exactly the same reason.
+
+### pydevd's own startup chatter on the debuggee's stdio
+
+Separate from the REPL-vs-inferior multiplexing above: pydevd itself writes
+a couple of lines directly to the debuggee process's real stdout/stderr fd
+(not via DAP `output` events) during its own startup, *before* the user's
+script runs:
+
+- `"<N>s - Debugger warning: It seems that frozen modules are being
+  used..."` — via `pydev_log.critical` (`pydevd_file_utils.py`). Respects
+  `--log-file`/`PYDEVD_DEBUG_FILE` (redirects pydev_log's stream to a file)
+  and `PYDEVD_DISABLE_FILE_VALIDATION` (downgrades it to debug level,
+  suppressed at the default `log_level`).
+- `"pydevd: waiting for connection at: HOST:PORT"` — `pydevd_comm.
+  start_server`, an **unconditional `print(msg, file=sys.stderr)`**. Cannot
+  be suppressed or redirected by any pydevd option.
+
+Once execution actually starts, pydevd's own diagnostics (e.g. "evaluation
+did not finish after Ns") go over the DAP `output` channel to *us*, not to
+the debuggee's stdio — so a running TUI is not at ongoing risk from pydevd
+itself, only from these one-time startup lines.
+
+In default mode these just appear in the interleaved output like anything
+else. In `--pty <device>` mode, they land on the target terminal as the
+first line(s), before the script (and any `curses.initscr()`) runs — once
+curses switches to the alternate screen buffer they're hidden underneath,
+and reappear (scrolled past) when the TUI exits. Cosmetic and transient, not
+an ongoing interference.
+
 
 ## `--pty <device>`: external-terminal redirect (gdb `inferior-tty` style)
 
@@ -173,6 +259,16 @@ also redirects all three).
   line discipline, its own Ctrl+C (delivered to the inferior's foreground
   process group by the kernel via that pty's `ISIG`, nothing to do with
   pydev-repl), its own echo. pydev-repl's terminal is never touched.
+- **Real job control.** `spawn_pydevd` uses `start_new_session=True`
+  (`setsid()`) for both modes. With no `O_NOCTTY` on the `os.open(path,
+  os.O_RDWR)`, opening the target tty as the new session's first terminal
+  makes it that session's *controlling terminal* (standard Linux/POSIX
+  behavior). So Ctrl+Z typed in the target terminal genuinely suspends the
+  inferior (`SIGTSTP` via that tty's line discipline to the inferior's
+  process group), terminal resize of the target terminal is seen normally by
+  the inferior (`SIGWINCH`/`TIOCGWINSZ` against *that* tty), and curses/raw
+  mode there is exactly as if the inferior had been run directly in that
+  terminal — none of the default-mode limitations above apply.
 
 **Caveats** (same as gdb's `tty`):
 
@@ -217,8 +313,8 @@ no local process to attach a device to.
 
 ## Summary
 
-| Mode | stdout/stderr | stdin | Passthrough thread | Terminal mode changes |
-|---|---|---|---|---|
-| `run()`, default (no `--pty`) | `master_fd -> our stdout`, continuous bg thread | `our stdin -> master_fd`, scoped to blocking resume calls | yes, started/stopped per resume call | `cbreak` (ISIG kept) during passthrough |
-| `run()`, `--pty <device>` | direct to external tty | direct to external tty | none | none — our terminal untouched |
-| `connect()` | not visible (or via `output` events, future work) | not possible | none | none |
+| Mode | stdout/stderr | stdin | Passthrough thread | Terminal mode changes | Job control / TUI |
+|---|---|---|---|---|---|
+| `run()`, default (no `--pty`) | `master_fd -> our stdout`, continuous bg thread | `our stdin -> master_fd`, scoped to blocking resume calls | yes, started/stopped per resume call | `cbreak` (ISIG kept) during passthrough | none — no Ctrl+Z, no resize propagation, curses clashes with our screen |
+| `run()`, `--pty <device>` | direct to external tty | direct to external tty | none | none — our terminal untouched | full — separate controlling terminal, Ctrl+Z/resize/curses all work natively |
+| `connect()` | not visible (or via `output` events, future work) | not possible | none | none | n/a |

@@ -35,13 +35,14 @@ def run(script: str | None = None, *args: str) -> None:
         print("error: no script given (pass one to run(), or --file at startup)")
         return
 
-    SESSION.process = _launch.spawn_pydevd(run_ctx)
+    SESSION.process = _launch.spawn_pydevd(run_ctx, SESSION.options.pty)
     print(f"launched pid={SESSION.process.child.pid}")
 
-    SESSION.reader_thread = threading.Thread(
-        target=_stream_output, args=(SESSION.process.master_fd,), daemon=True
-    )
-    SESSION.reader_thread.start()
+    if SESSION.process.master_fd is not None:
+        SESSION.reader_thread = threading.Thread(
+            target=_stream_output, args=(SESSION.process.master_fd,), daemon=True
+        )
+        SESSION.reader_thread.start()
 
     # The pydevd server takes a moment to bind its socket after spawning.
     _connect(retries=25, delay=0.2)

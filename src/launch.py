@@ -36,7 +36,6 @@ class QtSupport(enum.Enum):
 OBLIGATORY_RUN_ARGUMENTS = [
     "--server",
     "--json-dap-http",
-    "--skip-notify-stdin",
 ]
 
 SANITIZE_RUN_ARGUMENTS = [
@@ -306,12 +305,30 @@ def build_spawn_env(run_ctx: RunContext, source_env: dict[str, str]) -> dict[str
 @dataclasses.dataclass
 class LaunchedProcess:
     child: subprocess.Popen
-    master_fd: int
+    # None when `pty_device` was given: the inferior's stdio is redirected
+    # straight to that external tty and there is nothing on our side to
+    # stream from (see reference/io_model.md).
+    master_fd: int | None
 
 
-def spawn_pydevd(run_ctx: RunContext) -> LaunchedProcess:
+def spawn_pydevd(run_ctx: RunContext, pty_device: str | None = None) -> LaunchedProcess:
     spawn_argv = build_spawn_argv(run_ctx)
     spawn_env = build_spawn_env(run_ctx, dict(os.environ))
+
+    if pty_device is not None:
+        fd = os.open(pty_device, os.O_RDWR)
+        try:
+            child = subprocess.Popen(
+                spawn_argv,
+                env=spawn_env,
+                stdin=fd,
+                stdout=fd,
+                stderr=fd,
+                start_new_session=True,
+            )
+        finally:
+            os.close(fd)
+        return LaunchedProcess(child=child, master_fd=None)
 
     master_fd, slave_fd = pty.openpty()
     try:

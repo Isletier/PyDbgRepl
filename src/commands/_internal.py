@@ -5,7 +5,11 @@ __main__).
 """
 import os
 import readline
+import select
 import sys
+import termios
+import threading
+import tty
 
 from .. import dap as _dap
 from ..session import SESSION
@@ -69,11 +73,91 @@ def _end_session() -> None:
         if SESSION.process.child.poll() is None:
             SESSION.process.child.kill()
         SESSION.process.child.wait()
-        os.close(SESSION.process.master_fd)
+        if SESSION.process.master_fd is not None:
+            os.close(SESSION.process.master_fd)
         SESSION.process = None
         SESSION.reader_thread = None
 
     _clear_dap_state()
+
+
+# ---- stdin passthrough (see reference/io_model.md) ----
+
+class _StdinPassthrough:
+    """Forward our stdin to the inferior's pty while a blocking resume call is in flight.
+
+    Switches our terminal to cbreak (ICANON/ECHO off, ISIG kept -- Ctrl+C
+    still raises SIGINT in our process and goes through _sigint_handler ->
+    interrupt(), unchanged). Restores cooked mode on stop().
+    """
+
+    def __init__(self, master_fd: int):
+        self._master_fd = master_fd
+        self._stop_r, self._stop_w = os.pipe()
+        self._old_settings: list | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if not sys.stdin.isatty():
+            return
+        self._old_settings = termios.tcgetattr(0)
+        tty.setcbreak(0)
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        while True:
+            try:
+                rlist, _, _ = select.select([0, self._stop_r], [], [])
+            except (OSError, ValueError):
+                return
+            if self._stop_r in rlist:
+                return
+            try:
+                data = os.read(0, 1024)
+            except OSError:
+                return
+            if not data:
+                return
+            try:
+                os.write(self._master_fd, data)
+            except OSError:
+                return
+
+    def stop(self) -> None:
+        if self._thread is not None:
+            os.write(self._stop_w, b"x")
+            self._thread.join()
+        os.close(self._stop_r)
+        os.close(self._stop_w)
+        if self._old_settings is not None:
+            termios.tcsetattr(0, termios.TCSADRAIN, self._old_settings)
+
+
+def _on_input_requested(message: dict) -> None:
+    """`client.on_event` handler, scoped to the passthrough window.
+
+    Tells the user when their forwarded keystrokes are actually being
+    consumed by the inferior's stdin reads, as opposed to just sitting in
+    the pty buffer.
+
+    Caveat (see reference/io_model.md): pydevd's installed version sends
+    `pydevdInputRequested` with an empty body -- the documented `started`
+    field is never populated -- so this falls back to toggling on each
+    event. Also, CPython's input() bypasses sys.stdin (and this event)
+    entirely when stdin/stdout are both ttys, which is true for both our
+    default PTY-pair mode and --pty; only direct sys.stdin.read()/readline()
+    (or getpass) in the inferior trigger it.
+    """
+    if message.get("event") != "pydevdInputRequested":
+        return
+    body = message.get("body") or {}
+    started = body["started"] if "started" in body else not SESSION.awaiting_input
+    SESSION.awaiting_input = started
+    if started:
+        _async_print("--- debuggee is waiting for input ---")
+    else:
+        _async_print("--- input received, resuming ---")
 
 
 # ---- blocking resume + event handling ----
@@ -82,8 +166,27 @@ _RESUME_RESULT_EVENTS = {"stopped", "exited", "terminated", "_disconnected"}
 
 
 def _wait_for_resume_result(client: _dap.DAPClient) -> None:
-    """Block until the resumed program stops, exits, or the connection drops."""
-    message = client.wait_for_any_event(_RESUME_RESULT_EVENTS)
+    """Block until the resumed program stops, exits, or the connection drops.
+
+    While blocked, forwards our stdin to the inferior's pty (default mode
+    only -- not under --pty, and not for connect()-only sessions where we
+    hold no fd to the debuggee's stdio). See reference/io_model.md.
+    """
+    passthrough = None
+    old_on_event = client.on_event
+    if SESSION.process is not None and SESSION.process.master_fd is not None:
+        passthrough = _StdinPassthrough(SESSION.process.master_fd)
+        passthrough.start()
+        client.on_event = _on_input_requested
+
+    try:
+        message = client.wait_for_any_event(_RESUME_RESULT_EVENTS)
+    finally:
+        if passthrough is not None:
+            client.on_event = old_on_event
+            passthrough.stop()
+            SESSION.awaiting_input = False
+
     event = message["event"]
     body = message["body"]
 
