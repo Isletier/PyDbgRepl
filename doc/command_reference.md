@@ -60,6 +60,7 @@ below.
 | Command | Returns | Description | Status |
 |---|---|---|---|
 | `set(name, value)` | `Status \| Error` | Generic config registry over `RunContext.args_opt`/`.env`/`ReplOptions` (`src/options.py`); includes the `completion` and `ui` options themselves. | done |
+| `get(name)` | `Status \| Error` | Get the current value of a single option, or every option in a group at once: `"args_opt"`, `"env"`, `"repl"` (the corresponding `RunContext`/`ReplOptions` dataclasses), or `"args"` (the inferior's argv). Same `name` arguments as `reset()`. | done |
 | `reset(name)` | `Status \| Error` | Reset a single option to its dataclass default, or a whole group at once: `"args_opt"`, `"env"`, `"repl"` (the corresponding `RunContext`/`ReplOptions` dataclasses), or `"args"` (the inferior's argv, reset to `[]`). | done |
 
 
@@ -134,6 +135,13 @@ All of these now **block** until the program stops/exits — see
 |---|---|---|---|
 | `modules()` | `ModuleList \| Error` | Loaded modules: id, name, path. | done |
 | `pydevd_info()` | `InfoSections \| Error` | Process/Python/platform info — debugging-the-debugger convenience. | done |
+
+
+## Key-binding shortcuts
+
+ptpython F-key shortcuts (F5/F10/F11/F12 → `cont`/`next`/`step`/`finish` by
+default) are layered on top of these commands — see `doc/keybindings.md` for
+the extensible binding system and how to customize/disable them.
 
 
 ## Out of scope (pydevd has no support at all)

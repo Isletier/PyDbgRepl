@@ -89,6 +89,25 @@ def reset_option(name: str) -> Any:
     return default
 
 
+def get_option(name: str) -> Any:
+    """Current value of option `name`. Raises KeyError if `name` is not a known option."""
+    group = _find_group(name)
+    if group is None:
+        raise KeyError(name)
+    return getattr(group.target, name)
+
+
+def get_group(name: str) -> dict[str, Any]:
+    """Current value of every option in group `name`, as {name: value}.
+
+    Raises KeyError if `name` is not a registered group.
+    """
+    for group in _GROUPS:
+        if group.name == name:
+            return {f.name: getattr(group.target, f.name) for f in dataclasses.fields(group.target)}
+    raise KeyError(name)
+
+
 def group_names() -> list[str]:
     """Names of registered option groups, for reset_group() and tab-completion."""
     return [g.name for g in _GROUPS if g.name is not None]

@@ -104,6 +104,7 @@ def _embed_ptpython() -> None:
     from prompt_toolkit.patch_stdout import patch_stdout as _patch_stdout
     from ptpython.repl import PythonRepl
 
+    from . import keybindings
     from .completion import DebuggerCompleter
     from .highlighting import make_lexer
 
@@ -116,6 +117,7 @@ def _embed_ptpython() -> None:
     repl = PythonRepl(get_globals=get_globals, get_locals=get_globals, _lexer=make_lexer())
     repl.completer = DebuggerCompleter(repl.completer)
     _configure_ptpython(repl)
+    keybindings.install(repl)
 
     with _patch_stdout():
         repl.run()

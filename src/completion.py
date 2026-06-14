@@ -34,6 +34,7 @@ _ARG_TABLE: dict[str, list[str | None] | str] = {
     "frame": ["frame_index"],
     "catch": "exception_filter",
     "set": ["option_name", None],
+    "get": ["reset_target"],
     "reset": ["reset_target"],
 }
 

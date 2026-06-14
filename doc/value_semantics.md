@@ -108,3 +108,31 @@ it has *any* user-visible side effect or outcome (including failure), it
 returns a value (`Status`/`Error`/a dedicated wrapper); only truly
 side-effect-free, can't-fail operations would justify `None`, and in practice
 none of the current commands qualify.
+
+
+## Known limitation: `Status` is a stub for scripting
+
+`Status` was designed to make the *human-readable* line a real return value
+(see "Success values" above), but for many commands it's currently just that
+one formatted string with no structured data behind it — so while
+`if not result:` works, scripts can't get at the actual value without
+re-parsing the `repr()`. This was an oversight: scripting use was the whole
+point of this convention, and `Status` as a bare string doesn't deliver it
+for these commands. Notable offenders:
+
+- **`set(name, value)`/`get(name)`/`reset(name)`** — return `Status(f"{name}
+  = {value!r}")`. A script calling `get("port")` gets back the string
+  `"port = 25516"`, not `25516` or `{"port": 25516}`. For a single option
+  these should probably return the value itself (or `(name, value)`); for a
+  group, a dict/mapping type a la `InfoSections`.
+- **`breakpoint()`/`tbreak()`/`enable()`/`disable()`/`clear()`/`ignore()`/
+  `catch()`** — return a one-line `Status` confirmation instead of the
+  breakpoint dict(s) affected, so scripts can't chain off the new
+  breakpoint's id/line/etc.
+- **`stop()`/`disconnect()`/`terminate()`/`interrupt()`** — `Status("...")`
+  is probably fine as-is (genuinely no structured result), but worth
+  revisiting once the above are reworked, for consistency.
+
+This needs a proper pass per-command (not a blanket type swap — each
+command's "useful structured value" differs), but should happen before
+relying on these commands from scripts beyond truthiness checks.
