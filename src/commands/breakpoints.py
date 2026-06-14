@@ -2,6 +2,7 @@
 from .. import dap as _dap
 from ..session import SESSION
 from . import _internal
+from ._display import Breakpoints, Error, Status
 from ._internal import _resolve_path_line
 
 __all__ = [
@@ -22,7 +23,7 @@ def _send_breakpoints(path: str) -> None:
 
 
 def breakpoint(path_or_line: str | int, line: int | None = None,
-               condition: str | None = None, log_message: str | None = None) -> None:
+               condition: str | None = None, log_message: str | None = None) -> Status | Error:
     """Set a line breakpoint at `path_or_line`:`line`.
 
     `path_or_line` may be a bare line number in the current file instead of a
@@ -31,8 +32,8 @@ def breakpoint(path_or_line: str | int, line: int | None = None,
     message and continues, without stopping).
     """
     resolved = _resolve_path_line(path_or_line, line)
-    if resolved is None:
-        return
+    if isinstance(resolved, Error):
+        return resolved
     path, line = resolved
 
     bp = {"line": line, "enabled": True}
@@ -45,14 +46,14 @@ def breakpoint(path_or_line: str | int, line: int | None = None,
     bps[:] = [b for b in bps if b["line"] != line] + [bp]
 
     _send_breakpoints(path)
-    print(f"breakpoint set at {path}:{line}")
+    return Status(f"breakpoint set at {path}:{line}")
 
 
-def clear(path_or_line: str | int, line: int | None = None) -> None:
+def clear(path_or_line: str | int, line: int | None = None) -> Status | Error:
     """Remove the breakpoint at `path_or_line`:`line`, if any."""
     resolved = _resolve_path_line(path_or_line, line)
-    if resolved is None:
-        return
+    if isinstance(resolved, Error):
+        return resolved
     path, line = resolved
 
     bps = SESSION.breakpoints.get(path, [])
@@ -60,54 +61,56 @@ def clear(path_or_line: str | int, line: int | None = None) -> None:
     SESSION.temporary_breakpoints.discard((path, line))
 
     _send_breakpoints(path)
-    print(f"breakpoint cleared at {path}:{line}")
+    return Status(f"breakpoint cleared at {path}:{line}")
 
 
-def catch(*filters: str) -> None:
+def catch(*filters: str) -> Status:
     """Set exception breakpoint filters, e.g. catch("raised", "uncaught")."""
     SESSION.exception_filters = list(filters)
     if SESSION.dap is not None:
         SESSION.dap.set_exception_breakpoints(SESSION.exception_filters)
-    print(f"exception filters = {SESSION.exception_filters}")
+    return Status(f"exception filters = {SESSION.exception_filters}")
 
 
-def tbreak(path_or_line: str | int, line: int | None = None, condition: str | None = None) -> None:
+def tbreak(path_or_line: str | int, line: int | None = None, condition: str | None = None) -> Status | Error:
     """Set a temporary breakpoint: cleared automatically the first time it's hit."""
     resolved = _resolve_path_line(path_or_line, line)
-    if resolved is None:
-        return
+    if isinstance(resolved, Error):
+        return resolved
     path, line = resolved
 
-    breakpoint(path, line, condition=condition)
+    result = breakpoint(path, line, condition=condition)
+    if isinstance(result, Error):
+        return result
     SESSION.temporary_breakpoints.add((path, line))
+    return result
 
 
-def _set_enabled(path_or_line: str | int, line: int | None, enabled: bool) -> None:
+def _set_enabled(path_or_line: str | int, line: int | None, enabled: bool) -> Status | Error:
     resolved = _resolve_path_line(path_or_line, line)
-    if resolved is None:
-        return
+    if isinstance(resolved, Error):
+        return resolved
     path, line = resolved
 
     for b in SESSION.breakpoints.get(path, []):
         if b["line"] == line:
             b["enabled"] = enabled
             _send_breakpoints(path)
-            print(f"breakpoint at {path}:{line} {'enabled' if enabled else 'disabled'}")
-            return
-    print(f"error: no breakpoint at {path}:{line}")
+            return Status(f"breakpoint at {path}:{line} {'enabled' if enabled else 'disabled'}")
+    return Error(f"no breakpoint at {path}:{line}")
 
 
-def enable(path_or_line: str | int, line: int | None = None) -> None:
+def enable(path_or_line: str | int, line: int | None = None) -> Status | Error:
     """Re-enable a breakpoint without forgetting its condition/etc."""
-    _set_enabled(path_or_line, line, True)
+    return _set_enabled(path_or_line, line, True)
 
 
-def disable(path_or_line: str | int, line: int | None = None) -> None:
+def disable(path_or_line: str | int, line: int | None = None) -> Status | Error:
     """Disable a breakpoint without forgetting it -- omitted from setBreakpoints until re-enabled."""
-    _set_enabled(path_or_line, line, False)
+    return _set_enabled(path_or_line, line, False)
 
 
-def ignore(path_or_line: str | int, line_or_count: int, count: int | None = None) -> None:
+def ignore(path_or_line: str | int, line_or_count: int, count: int | None = None) -> Status | Error:
     """Ignore the next `count` hits of a breakpoint, via pydevd's hitCondition.
 
     Normally `ignore(path_or_line, line, count)`. If `count` is omitted,
@@ -117,13 +120,12 @@ def ignore(path_or_line: str | int, line_or_count: int, count: int | None = None
     if count is None:
         path = _internal._current_file()
         if path is None:
-            print("error: no current file (pass an explicit path)")
-            return
+            return Error("no current file (pass an explicit path)")
         line, count = path_or_line, line_or_count
     else:
         resolved = _resolve_path_line(path_or_line, line_or_count)
-        if resolved is None:
-            return
+        if isinstance(resolved, Error):
+            return resolved
         path, line = resolved
 
     for b in SESSION.breakpoints.get(path, []):
@@ -133,12 +135,11 @@ def ignore(path_or_line: str | int, line_or_count: int, count: int | None = None
             else:
                 b.pop("hitCondition", None)
             _send_breakpoints(path)
-            print(f"breakpoint at {path}:{line} will ignore the next {count} hits")
-            return
-    print(f"error: no breakpoint at {path}:{line}")
+            return Status(f"breakpoint at {path}:{line} will ignore the next {count} hits")
+    return Error(f"no breakpoint at {path}:{line}")
 
 
-def funcbreak(name: str, condition: str | None = None) -> None:
+def funcbreak(name: str, condition: str | None = None) -> Status:
     """Set a breakpoint on entry to function `name` (setFunctionBreakpoints)."""
     fb = {"name": name}
     if condition is not None:
@@ -149,44 +150,22 @@ def funcbreak(name: str, condition: str | None = None) -> None:
 
     if SESSION.dap is not None:
         SESSION.dap.set_function_breakpoints(bps)
-    print(f"function breakpoint set at {name}")
+    return Status(f"function breakpoint set at {name}")
 
 
-def breakpoints() -> None:
-    """List all breakpoints, function breakpoints, and exception filters."""
-    printed = False
-
-    for path, bps in SESSION.breakpoints.items():
-        for b in sorted(bps, key=lambda b: b["line"]):
-            status = "enabled" if b.get("enabled", True) else "disabled"
-            extra = ", ".join(
-                f"{k}={v!r}" for k, v in b.items() if k not in ("line", "enabled")
-            )
-            suffix = f" ({extra})" if extra else ""
-            print(f"{path}:{b['line']} [{status}]{suffix}")
-            printed = True
-
-    for fb in SESSION.function_breakpoints:
-        extra = ", ".join(f"{k}={v!r}" for k, v in fb.items() if k != "name")
-        suffix = f" ({extra})" if extra else ""
-        print(f"function {fb['name']}{suffix}")
-        printed = True
-
-    if SESSION.exception_filters:
-        print(f"exception filters: {SESSION.exception_filters}")
-        printed = True
-
-    if not printed:
-        print("no breakpoints set")
+def breakpoints() -> Breakpoints:
+    """All breakpoints, function breakpoints, and exception filters."""
+    return Breakpoints(SESSION.breakpoints, SESSION.function_breakpoints, SESSION.exception_filters)
 
 
-def _on_stopped(reason: str | None, top: dict | None) -> None:
+def _on_stopped(reason: str | None, top: dict | None) -> str | None:
     if reason != "breakpoint" or top is None:
-        return
+        return None
     path = (top.get("source") or {}).get("path")
     line = top.get("line")
     if (path, line) in SESSION.temporary_breakpoints:
-        clear(path, line)
+        return str(clear(path, line))
+    return None
 
 
 _internal.post_stop_hooks.append(_on_stopped)

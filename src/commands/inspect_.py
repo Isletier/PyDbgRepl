@@ -2,6 +2,7 @@
 from .. import dap as _dap
 from ..session import SESSION
 from . import _internal
+from ._display import CompletionList, Error, ExceptionInfo, Scope, Status
 from ._internal import _ensure_dap_paused
 
 __all__ = [
@@ -10,135 +11,131 @@ __all__ = [
 ]
 
 
-def p(expression: str) -> None:
-    """Evaluate `expression` in the current frame and print the result."""
-    if not _ensure_dap_paused():
-        return
+def p(expression: str) -> Status | Error:
+    """Evaluate `expression` in the current frame and return the result."""
+    err = _ensure_dap_paused()
+    if err is not None:
+        return err
 
     try:
         result = SESSION.dap.evaluate(expression, frame_id=SESSION.current_frame_id, context="repl")
     except _dap.DAPError as e:
-        print(f"error: {e}")
-        return
-    print(result["result"])
+        return Error(str(e))
+    return Status(result["result"])
 
 
-def _print_scope(scope_name: str) -> None:
-    if not _ensure_dap_paused():
-        return
+def _scope(scope_name: str) -> Scope | Error:
+    err = _ensure_dap_paused()
+    if err is not None:
+        return err
     if SESSION.current_frame_id is None:
-        print("error: no current frame (use bt())")
-        return
+        return Error("no current frame (use bt())")
 
     for scope in SESSION.dap.scopes(SESSION.current_frame_id)["scopes"]:
         if scope["name"] != scope_name:
             continue
-        for v in SESSION.dap.variables(scope["variablesReference"])["variables"]:
-            print(f"{v['name']} = {v['value']}")
+        return Scope(SESSION.dap.variables(scope["variablesReference"])["variables"])
+    return Scope()
 
 
-def locals() -> None:
-    """Print local variables of the current frame."""
-    _print_scope("Locals")
+def locals() -> Scope | Error:
+    """Local variables of the current frame."""
+    return _scope("Locals")
 
 
-def globals_() -> None:
-    """Print global variables visible from the current frame."""
-    _print_scope("Globals")
+def globals_() -> Scope | Error:
+    """Global variables visible from the current frame."""
+    return _scope("Globals")
 
 
-def setvar(name: str, value: str) -> None:
+def setvar(name: str, value: str) -> Status | Error:
     """Assign `value` (a Python expression) to variable `name` in the current frame."""
-    if not _ensure_dap_paused():
-        return
+    err = _ensure_dap_paused()
+    if err is not None:
+        return err
 
     try:
         SESSION.dap.evaluate(f"{name} = {value}", frame_id=SESSION.current_frame_id, context="repl")
     except _dap.DAPError as e:
-        print(f"error: {e}")
-        return
-    print(f"{name} = {value}")
+        return Error(str(e))
+    return Status(f"{name} = {value}")
 
 
-def whatis(expression: str) -> None:
-    """Print the type of `expression`, evaluated in the current frame."""
-    if not _ensure_dap_paused():
-        return
+def whatis(expression: str) -> Status | Error:
+    """The type of `expression`, evaluated in the current frame."""
+    err = _ensure_dap_paused()
+    if err is not None:
+        return err
 
     try:
         result = SESSION.dap.evaluate(expression, frame_id=SESSION.current_frame_id, context="hover")
     except _dap.DAPError as e:
-        print(f"error: {e}")
-        return
-    print(result.get("type", "?"))
+        return Error(str(e))
+    return Status(result.get("type", "?"))
 
 
-def display(expression: str) -> None:
-    """Add `expression` to the list re-evaluated and printed after every stop."""
+def display(expression: str) -> Status:
+    """Add `expression` to the list re-evaluated after every stop."""
     display_id = max((d["id"] for d in SESSION.displays), default=0) + 1
     SESSION.displays.append({"id": display_id, "expr": expression})
-    print(f"{display_id}: {expression}")
+    lines = [f"{display_id}: {expression}"]
     if SESSION.dap is not None and not SESSION.running:
-        _show_display(SESSION.displays[-1])
+        lines.append(_show_display(SESSION.displays[-1]))
+    return Status("\n".join(lines))
 
 
-def undisplay(display_id: int) -> None:
+def undisplay(display_id: int) -> Status | Error:
     """Remove a display expression added with display()."""
     before = len(SESSION.displays)
     SESSION.displays[:] = [d for d in SESSION.displays if d["id"] != display_id]
     if len(SESSION.displays) == before:
-        print(f"error: no display {display_id}")
-        return
-    print(f"{display_id}: deleted")
+        return Error(f"no display {display_id}")
+    return Status(f"{display_id}: deleted")
 
 
-def _show_display(d: dict) -> None:
+def _show_display(d: dict) -> str:
     try:
         result = SESSION.dap.evaluate(d["expr"], frame_id=SESSION.current_frame_id, context="repl")
     except _dap.DAPError as e:
-        print(f"{d['id']}: {d['expr']} = <error: {e}>")
-        return
-    print(f"{d['id']}: {d['expr']} = {result['result']}")
+        return f"{d['id']}: {d['expr']} = <error: {e}>"
+    return f"{d['id']}: {d['expr']} = {result['result']}"
 
 
-def exception_info() -> None:
-    """Print details of the exception that stopped the current thread, if any."""
-    if not _internal._ensure_thread_paused():
-        return
+def exception_info() -> ExceptionInfo | Error:
+    """Details of the exception that stopped the current thread, if any."""
+    err = _internal._ensure_thread_paused()
+    if err is not None:
+        return err
 
     try:
         info = SESSION.dap.exception_info(SESSION.current_thread_id)
     except _dap.DAPError as e:
-        print(f"error: {e}")
-        return
+        return Error(str(e))
 
-    print(f"{info.get('exceptionId', '?')}: {info.get('description', '')}")
-    details = info.get("details") or {}
-    if details.get("stackTrace"):
-        print(details["stackTrace"])
+    return ExceptionInfo(info)
 
 
-def completions(text: str, column: int) -> None:
-    """Print completion suggestions for `text` (cursor at `column`) in the current frame.
+def completions(text: str, column: int) -> CompletionList | Error:
+    """Completion suggestions for `text` (cursor at `column`) in the current frame.
 
     Backing for future REPL tab-completion (see completion_design.md); not
     normally called directly.
     """
-    if not _ensure_dap_paused():
-        return
+    err = _ensure_dap_paused()
+    if err is not None:
+        return err
 
     try:
         result = SESSION.dap.completions(text, column, frame_id=SESSION.current_frame_id)
     except _dap.DAPError as e:
-        print(f"error: {e}")
-        return
-    for item in result.get("targets", []):
-        print(item.get("label", item))
+        return Error(str(e))
+    return CompletionList(result.get("targets", []))
 
 
-def _on_stopped(reason: str | None, top: dict | None) -> None:
-    for d in SESSION.displays:
-        _show_display(d)
+def _on_stopped(reason: str | None, top: dict | None) -> str | None:
+    if not SESSION.displays:
+        return None
+    return "\n".join(_show_display(d) for d in SESSION.displays)
 
 
 _internal.post_stop_hooks.append(_on_stopped)

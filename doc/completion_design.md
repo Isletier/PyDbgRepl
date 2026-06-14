@@ -61,12 +61,18 @@ table:
 
 | Command | Arg 0 | Arg 1 | Arg 2+ |
 |---|---|---|---|
+| `run(script, *args, stdin=, stdout=, stderr=)` | `.py` file completer (§3) **or** `stdin=`/`stdout=`/`stderr=` kwarg names | `stdin=`/`stdout=`/`stderr=` kwarg names | (same, at every position — kwargs can follow any number of `*args`) |
 | `breakpoint(path, line, condition=...)` | file completer (§3) | — (no completion; pdb doesn't complete line numbers either) | — |
 | `clear(path, line)` | file completer | — | — |
 | `thread(thread_id)` | live thread ids from `SESSION.dap.threads()` (if connected), as `id` with `name` shown in the completion menu | | |
 | `frame(index)` | `0..len(stack)-1` from the current thread's stack trace (if paused) | | |
 | `catch(*filters)` | exception filter ids from the `initialize` response's `exceptionBreakpointFilters` (fallback: `raised`/`uncaught`/`userUnhandled`) | (same, repeatable) | |
 | `set(name, value)` | option names from `_options.list_options()` | — (depends on option; no completion for v1) | |
+
+Once a `stdin=`/`stdout=`/`stderr=` kwarg name is completed and `=` typed,
+its value gets the file completer with **no `.py` restriction** (these are
+redirection targets, not scripts) — `file_completions(fragment, ext=None)`.
+`stderr=` additionally offers the `"&1"` sentinel (see [[project_io_model]]).
 
 **Detecting "inside call X, argument N"**: a regex/bracket-depth scan of
 `document.text_before_cursor` from the end — find the nearest unmatched `(`,
@@ -154,14 +160,17 @@ overload in `doc/command_reference.md` once implemented.
 
 ## Implementation order (cost, roughly ascending)
 
-1. `embed()` → manual `PythonRepl` construction (prerequisite, no visible
-   behavior change).
-2. `completion` option + mode dispatch in a (for now empty/pass-through)
-   `DebuggerCompleter`.
-3. Classical shortcuts (`breakpoint(10)`/`clear(10)`) — independent of
-   completion work, can land any time.
-4. Top-level command-name-only completion.
-5. File completer (basename matching + disambiguation).
-6. Argument-position-aware completion table (uses the file completer from
-   step 5 for `breakpoint`/`clear`'s first argument).
-7. *(phase 2)* DAP-backed `p()` expression completion.
+1. ~~`embed()` → manual `PythonRepl` construction (prerequisite, no visible
+   behavior change).~~ — done.
+2. ~~`completion` option + mode dispatch in `DebuggerCompleter`.~~ — done.
+3. ~~Classical shortcuts (`breakpoint(10)`/`clear(10)`).~~ — done (via
+   `_resolve_path_line` in `_internal.py`, predates this pass).
+4. ~~Top-level command-name-only completion.~~ — done.
+5. ~~File completer (basename matching + disambiguation).~~ — done
+   (`src/completion.py`: `file_completions()`).
+6. ~~Argument-position-aware completion table~~ — done (`_ARG_TABLE` in
+   `src/completion.py`): `breakpoint`/`clear`/`tbreak`/`enable`/`disable`/
+   `ignore` (file), `thread`/`frame` (live ids), `catch` (exception filters),
+   `set`/`reset` (option names).
+7. *(phase 2, not yet implemented)* DAP-backed `p()`/`setvar()` expression
+   completion.

@@ -13,10 +13,13 @@ import tty
 
 from .. import dap as _dap
 from ..session import SESSION
+from ._display import Error, StopResult
 
-# Hooks run from _report_stopped() after the built-in "*** stopped ..." line,
-# e.g. to auto-clear a temporary breakpoint or re-evaluate display()
-# expressions. Populated by the submodules that own that state.
+# Hooks run from _report_stopped() to compute the returned StopResult's
+# `suffix` (extra lines shown after "*** stopped ..."), e.g. to auto-clear a
+# temporary breakpoint or re-evaluate display() expressions. Each hook is
+# called as hook(reason, top) and returns a str line (or None to contribute
+# nothing). Populated by the submodules that own that state.
 post_stop_hooks: list = []
 
 
@@ -145,15 +148,23 @@ class _StdinPassthrough:
 _RESUME_RESULT_EVENTS = {"stopped", "exited", "terminated", "_disconnected"}
 
 
-def _wait_for_resume_result(client: _dap.DAPClient) -> None:
+def _wait_for_resume_result(client: _dap.DAPClient, prefix: str = "") -> StopResult:
     """Block until the resumed program stops, exits, or the connection drops.
 
-    While blocked, forwards our stdin to the inferior's pty (default mode
-    only -- not under --pty, and not for connect()-only sessions where we
-    hold no fd to the debuggee's stdio). See doc/io_model.md.
+    While blocked, forwards our stdin to the inferior's pty -- only if its
+    stdin is still the owned-PTY-pair slave (not under --pty, not redirected
+    via stdin=, and not for connect()-only sessions where we hold no fd to
+    the debuggee's stdio). See doc/io_model.md.
+
+    `prefix` is shown before the outcome in the returned StopResult's repr,
+    e.g. "continuing" or "launched pid=1234\nconnected to 127.0.0.1:5678".
     """
     passthrough = None
-    if SESSION.process is not None and SESSION.process.master_fd is not None:
+    if (
+        SESSION.process is not None
+        and SESSION.process.master_fd is not None
+        and SESSION.process.stdin_is_pty
+    ):
         passthrough = _StdinPassthrough(SESSION.process.master_fd)
         passthrough.start()
 
@@ -167,23 +178,17 @@ def _wait_for_resume_result(client: _dap.DAPClient) -> None:
     body = message["body"]
 
     if event == "stopped":
-        _report_stopped(body)
+        result = _report_stopped(body, prefix=prefix)
         SESSION.running = False
-        return
+        return result
 
     # "exited"/"terminated"/"_disconnected" all mean this session is over —
     # the pydevd connection and any spawned process share one lifetime.
-    if event == "exited":
-        print(f"*** program exited with code {body.get('exitCode')}")
-    elif event == "terminated":
-        print("*** program terminated")
-    elif event == "_disconnected":
-        print("*** connection to pydevd lost")
-
     _end_session()
+    return StopResult(event, body, prefix=prefix)
 
 
-def _report_stopped(body: dict) -> None:
+def _report_stopped(body: dict, prefix: str = "") -> StopResult:
     SESSION.current_thread_id = body.get("threadId")
     SESSION.current_frame_id = None
     reason = body.get("reason")
@@ -199,14 +204,9 @@ def _report_stopped(body: dict) -> None:
         except _dap.DAPError:
             pass
 
-    if top is None:
-        print(f"*** stopped ({reason})")
-    else:
-        path = (top.get("source") or {}).get("path", "?")
-        print(f"*** stopped ({reason}) at {path}:{top['line']}, in {top['name']}")
+    suffix_lines = [line for line in (hook(reason, top) for hook in post_stop_hooks) if line]
 
-    for hook in post_stop_hooks:
-        hook(reason, top)
+    return StopResult("stopped", body, top_frame=top, prefix=prefix, suffix="\n".join(suffix_lines))
 
 
 def _on_dap_disconnect() -> None:
@@ -223,23 +223,21 @@ def _on_dap_disconnect() -> None:
 
 # ---- guards ----
 
-def _ensure_dap_paused() -> bool:
+def _ensure_dap_paused() -> Error | None:
     if SESSION.dap is None:
-        print("error: not connected (use connect())")
-        return False
+        return Error("not connected (use connect())")
     if SESSION.running:
-        print("error: program is running")
-        return False
-    return True
+        return Error("program is running")
+    return None
 
 
-def _ensure_thread_paused() -> bool:
-    if not _ensure_dap_paused():
-        return False
+def _ensure_thread_paused() -> Error | None:
+    err = _ensure_dap_paused()
+    if err is not None:
+        return err
     if SESSION.current_thread_id is None:
-        print("error: no current thread (use threads())")
-        return False
-    return True
+        return Error("no current thread (use threads())")
+    return None
 
 
 # ---- current location & path/line shortcuts ----
@@ -263,21 +261,19 @@ def _current_file() -> str | None:
     return _current_location()[0]
 
 
-def _resolve_path_line(path_or_line: str | int, line: int | None) -> tuple[str, int] | None:
+def _resolve_path_line(path_or_line: str | int, line: int | None) -> tuple[str, int] | Error:
     """Normalize the `(path_or_line, line)` shortcut shared by breakpoint/clear/etc.
 
     A bare `int` for `path_or_line` means "`path_or_line` is a line number in
-    the current file". Prints an error and returns None if neither a path nor
-    a current file is available.
+    the current file". Returns an `Error` if neither a path nor a current
+    file is available.
     """
     if isinstance(path_or_line, int):
         path = _current_file()
         if path is None:
-            print("error: no current file (pass an explicit path)")
-            return None
+            return Error("no current file (pass an explicit path)")
         return path, path_or_line
 
     if line is None:
-        print("error: line number required")
-        return None
+        return Error("line number required")
     return path_or_line, line

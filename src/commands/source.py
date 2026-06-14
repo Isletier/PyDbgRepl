@@ -1,11 +1,12 @@
 """Source listing: list()/l()."""
+from ._display import Error, SourceLines
 from ._internal import _current_location
 
 __all__ = ["list", "l"]
 
 
-def list(first: int | None = None, last: int | None = None) -> None:
-    """Print lines from the current file.
+def list(first: int | None = None, last: int | None = None) -> SourceLines | Error:
+    """Lines from the current file.
 
     No args: ~10 lines centered on the current line. `first` only: a window
     centered on that line (like pdb's `list 20`). Both: that range,
@@ -13,15 +14,13 @@ def list(first: int | None = None, last: int | None = None) -> None:
     """
     path, current_line = _current_location()
     if path is None:
-        print("error: no current file")
-        return
+        return Error("no current file")
 
     try:
         with open(path) as f:
             lines = f.readlines()
     except OSError as e:
-        print(f"error: {e}")
-        return
+        return Error(str(e))
     total = len(lines)
 
     if first is None and last is None:
@@ -35,9 +34,10 @@ def list(first: int | None = None, last: int | None = None) -> None:
         start = max(1, first)
         end = min(total, last)
 
-    for i in range(start, end + 1):
-        marker = "->" if i == current_line else "  "
-        print(f"{marker}{i:5d}\t{lines[i - 1].rstrip()}")
+    return SourceLines(
+        ((i, lines[i - 1].rstrip()) for i in range(start, end + 1)),
+        current_line=current_line,
+    )
 
 
 l = list

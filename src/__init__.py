@@ -91,21 +91,34 @@ class _PydevPromptStyle:
 
 
 def _configure_ptpython(repl) -> None:
+    from prompt_toolkit.styles import merge_styles
+
+    from .highlighting import STYLE_OVERRIDES
+
     repl.all_prompt_styles["pydev"] = _PydevPromptStyle()
     repl.prompt_style = "pydev"
+    repl._current_style = merge_styles([repl._current_style, STYLE_OVERRIDES])
 
 
 def _embed_ptpython() -> None:
-    from ptpython.repl import embed
+    from prompt_toolkit.patch_stdout import patch_stdout as _patch_stdout
+    from ptpython.repl import PythonRepl
+
+    from .completion import DebuggerCompleter
+    from .highlighting import make_lexer
 
     import __main__
     SESSION.ptpython_active = True
-    embed(
-        globals=vars(__main__),
-        locals=vars(__main__),
-        configure=_configure_ptpython,
-        patch_stdout=True,
-    )
+
+    def get_globals():
+        return vars(__main__)
+
+    repl = PythonRepl(get_globals=get_globals, get_locals=get_globals, _lexer=make_lexer())
+    repl.completer = DebuggerCompleter(repl.completer)
+    _configure_ptpython(repl)
+
+    with _patch_stdout():
+        repl.run()
 
 
 def start_eval() -> None:
@@ -119,7 +132,9 @@ def start_eval() -> None:
     signal.signal(signal.SIGINT, _sigint_handler)
 
     if SESSION.run_ctx.args_opt.file is not None:
-        _commands.run()
+        # Mirror the REPL's own repr-echo of run()'s result, since this call
+        # happens before the prompt (and its repl-echo machinery) exists.
+        print(repr(_commands.run()))
 
     import __main__
     for name in _commands_all:

@@ -1,11 +1,18 @@
 # Inferior I/O model
 
 How the debuggee's stdin/stdout/stderr relate to pydev-repl's own terminal,
-across the two session kinds (`run()` vs `connect()`) and the two I/O modes
-(default PTY-pair passthrough vs `--pty <device>` external-terminal
-redirect). Builds on [[project_sync_execution_model]] (the blocking
+across the two session kinds (`run()` vs `connect()`) and the three local
+I/O modes (default PTY-pair passthrough, `--pty <device>`
+external-terminal redirect, and per-stream `stdin=`/`stdout=`/`stderr=` file
+redirection). Builds on [[project_sync_execution_model]] (the blocking
 `cont()`/`step()`/... model) and supersedes the open questions in
 [[project_pty_io_forwarding]].
+
+The three local modes are mutually exclusive in pairs where it matters:
+`--pty` and `stdin=`/`stdout=`/`stderr=` cannot be combined (see
+"Mutual exclusion with `--pty`" below) — every session is either default
+pty-pair, `--pty <device>`, or (default pty-pair + per-stream file
+redirection for whichever streams were given).
 
 
 ## The two axes
@@ -13,8 +20,9 @@ redirect). Builds on [[project_sync_execution_model]] (the blocking
 |                          | **local (`run()`)** | **remote (`connect()`)** |
 |---|---|---|
 | We spawned the debuggee  | yes — `SESSION.process` | no |
-| We hold an fd to its stdio | yes (`master_fd`, or the `--pty` device) | no, never |
+| We hold an fd to its stdio | yes (`master_fd`, or the `--pty` device, or redirect files) | no, never |
 | `--pty <device>` applies | yes | no (ignored, see below) |
+| `stdin=`/`stdout=`/`stderr=` apply | yes | no (ignored, see below) |
 
 `connect()` attaches to a pydevd instance we did not start. Its stdin/stdout/
 stderr are wired to *whatever launched it* — a different terminal, a log
@@ -288,6 +296,93 @@ just inert (mirrors `set()`'s general "config now, used by `run()` later"
 semantics). Document it as a no-op rather than special-casing an error.
 
 
+## Per-stream file redirection: `stdin=`/`stdout=`/`stderr=`
+
+A third local I/O mode, independent of (and **mutually exclusive with**)
+`--pty`: redirect individual streams of the inferior to files, gdb/shell
+`<`/`>`-style, without giving up default pty-pair behavior for the streams
+left unredirected.
+
+**Usage**:
+
+```python
+debug.run("script.py", stdin="input.txt", stdout="output.txt")
+debug.run("script.py", stdout="output.txt", stderr="&1")
+```
+
+Backed by new `ArgsOptions.stdin`/`.stdout`/`.stderr` fields (`str | None`,
+alongside the existing `pty` field) — the same fields `run()`'s kwargs and
+`set("stdin"/"stdout"/"stderr", ...)` target. Unlike `pty`, these have no
+`--stdin`/`--stdout`/`--stderr` CLI flags for v1 — `run()` kwargs or `set()`
+only.
+
+**Why not `<`/`>` operators**: `run("script.py") < "in.txt" > "out.txt"`
+can't work the way it reads — `a < b > c` is a *chained comparison* in
+Python (`(a < b) and (b > c)`), not two independent operator calls on the
+result of `run(...)`, regardless of what `__lt__`/`__gt__` do. Keyword
+arguments are the closest fit to the existing command style and need no
+new syntax.
+
+### Per-stream resolution
+
+Each of `stdin`/`stdout`/`stderr` is resolved **independently** when
+`spawn_pydevd` builds the `Popen` call:
+
+- **Set to a path**: `os.open()` it directly — `os.O_RDONLY` for `stdin`,
+  `os.O_WRONLY | os.O_CREAT | os.O_TRUNC` for `stdout`/`stderr`
+  (truncate-on-open, shell `>` semantics; no `>>`-append in v1) — and pass
+  that fd to `Popen` for this stream.
+- **`stderr` only**, the literal string `"&1"`: "same destination as
+  `stdout`" (shell `2>&1`) — `os.dup()` whatever fd `stdout` resolved to,
+  whether that's a file or the pty slave. `stdin`/`stdout` have no
+  equivalent sentinel (nothing else to alias to).
+- **Unset** (the default): falls back to the pty-pair slave fd, exactly as
+  today.
+
+So `run("script.py", stdout="out.txt")` is a real mixed mode: stdin and
+stderr still get the default pty-pair passthrough behavior (input
+forwarding while blocked in `cont()`/etc., live streaming to our stdout for
+stderr), while stdout goes straight to the file — not an all-or-nothing
+switch.
+
+### Effect on the background threads
+
+- `_stream_output` (the `master_fd -> our stdout` thread) only starts if
+  **stdout or stderr** still resolves to the pty slave. If both are
+  redirected (to files, or `stderr="&1"` while `stdout` is a file), there's
+  nothing on `master_fd` worth reading for display.
+- `_StdinPassthrough` (per blocking resume call, as before) only starts if
+  **stdin** still resolves to the pty slave. A file-redirected stdin needs
+  no passthrough — the inferior reads the file directly.
+- `pty.openpty()` itself is only called if at least one of the three streams
+  still resolves to the pty slave. If `stdin`, `stdout`, and `stderr` are
+  *all* redirected (to files and/or `"&1"`), no pty is created at all —
+  `LaunchedProcess.master_fd` is `None`, same shape as `--pty` mode.
+
+### Mutual exclusion with `--pty`
+
+`--pty <device>` and any of `stdin=`/`stdout=`/`stderr=` are **mutually
+exclusive** — `run()` errors ("error: --pty conflicts with
+stdin=/stdout=/stderr= redirection — unset one") if both are set, rather
+than defining a combined behavior.
+
+Rationale: `--pty`'s entire point is handing the inferior a *real terminal*
+(a controlling tty, for job control/curses/resize — see above); per-stream
+file redirection's point is capturing one or more streams to a file
+*instead of* a terminal. There's no coherent meaning for "send stdout to
+this file, and also give the inferior `/dev/pts/7` as its controlling
+terminal for the other streams" worth the implementation cost of
+partial-`--pty` support, and no one has asked for it. Erroring loudly when
+both are set is simpler than silently picking a precedence order, and keeps
+`--pty`'s own code path (already a fully separate branch in
+`spawn_pydevd`) simple and self-contained.
+
+**`stdin=`/`stdout=`/`stderr=` + `connect()`**: same as `--pty` —
+`connect()` never spawns a process, so these are simply unused/inert if set
+without a prior local `run()`. No error, same "config now, used by `run()`
+later" semantics.
+
+
 ## Remote sessions (`connect()`): hard limits
 
 No `SESSION.process`, no fd of any kind to the debuggee's stdio — this is
@@ -308,14 +403,16 @@ fundamental, not a missing feature:
   close. If a remote `input()` call blocks, the only fix is on the machine
   actually running the debuggee.
 
-`--pty` is meaningless here for the same reason it's a no-op above: there is
-no local process to attach a device to.
+`--pty` and `stdin=`/`stdout=`/`stderr=` are meaningless here for the same
+reason they're no-ops above: there is no local process to attach a device or
+file to.
 
 
 ## Summary
 
 | Mode | stdout/stderr | stdin | Passthrough thread | Terminal mode changes | Job control / TUI |
 |---|---|---|---|---|---|
-| `run()`, default (no `--pty`) | `master_fd -> our stdout`, continuous bg thread | `our stdin -> master_fd`, scoped to blocking resume calls | yes, started/stopped per resume call | `cbreak` (ISIG kept) during passthrough | none — no Ctrl+Z, no resize propagation, curses clashes with our screen |
+| `run()`, default (no `--pty`, no redirection) | `master_fd -> our stdout`, continuous bg thread | `our stdin -> master_fd`, scoped to blocking resume calls | yes, started/stopped per resume call | `cbreak` (ISIG kept) during passthrough | none — no Ctrl+Z, no resize propagation, curses clashes with our screen |
 | `run()`, `--pty <device>` | direct to external tty | direct to external tty | none | none — our terminal untouched | full — separate controlling terminal, Ctrl+Z/resize/curses all work natively |
+| `run()`, `stdin=`/`stdout=`/`stderr=` (any subset) | redirected streams go straight to their file (or `&1`'s target); unredirected streams keep default-mode behavior | same | only for streams still on the pty slave | only while stdin is still on the pty slave | none for redirected streams; default-mode limits still apply to unredirected ones |
 | `connect()` | not visible (not pursued — no point without stdin) | not possible | none | none | n/a |

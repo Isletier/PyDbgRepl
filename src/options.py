@@ -1,6 +1,6 @@
 """Generic registry mapping option names to their backing dataclass field.
 
-`set`/`unset` (in commands.py) operate on whatever dataclass instances are
+`set`/`reset` (in commands.py) operate on whatever dataclass instances are
 registered here, regardless of which "kind" of option they are (pydevd CLI
 args, pydevd env vars, pydev-repl's own settings, ...). Adding a new group of
 options is just one `register()` call -- no new commands needed.
@@ -14,17 +14,21 @@ Reflection = Callable[[str], Any]
 
 
 class OptionGroup:
-    def __init__(self, target: object, reflections: dict[str, Reflection] | None = None):
+    def __init__(self, target: object, reflections: dict[str, Reflection] | None = None, name: str | None = None):
         self.target = target
         self.reflections = reflections or {}
+        self.name = name
 
 
 _GROUPS: list[OptionGroup] = []
 
 
-def register(target: object, reflections: dict[str, Reflection] | None = None) -> None:
-    """Register a dataclass instance whose fields are settable via set()/unset()."""
-    _GROUPS.append(OptionGroup(target, reflections))
+def register(target: object, reflections: dict[str, Reflection] | None = None, name: str | None = None) -> None:
+    """Register a dataclass instance whose fields are settable via set()/reset().
+
+    `name`, if given, lets the whole group be reset at once via reset_group().
+    """
+    _GROUPS.append(OptionGroup(target, reflections, name))
 
 
 def _find_group(name: str) -> OptionGroup | None:
@@ -68,7 +72,7 @@ def set_option(name: str, value: Any) -> Any:
     return getattr(group.target, name)
 
 
-def unset_option(name: str) -> Any:
+def reset_option(name: str) -> Any:
     """Reset option `name` to its dataclass default. Returns the default value.
 
     Raises KeyError if `name` is not a known option.
@@ -83,6 +87,30 @@ def unset_option(name: str) -> Any:
         default = f.default
     setattr(group.target, name, default)
     return default
+
+
+def group_names() -> list[str]:
+    """Names of registered option groups, for reset_group() and tab-completion."""
+    return [g.name for g in _GROUPS if g.name is not None]
+
+
+def reset_group(name: str) -> dict[str, Any]:
+    """Reset every option in group `name` to its dataclass default. Returns {name: default}.
+
+    Raises KeyError if `name` is not a registered group.
+    """
+    for group in _GROUPS:
+        if group.name == name:
+            result = {}
+            for f in dataclasses.fields(group.target):
+                if f.default_factory is not dataclasses.MISSING:
+                    default = f.default_factory()
+                else:
+                    default = f.default
+                setattr(group.target, f.name, default)
+                result[f.name] = default
+            return result
+    raise KeyError(name)
 
 
 def list_options() -> list[tuple[str, Any]]:

@@ -5,6 +5,7 @@ import time
 from .. import dap as _dap
 from .. import launch as _launch
 from ..session import SESSION
+from ._display import Error, Status, StopResult
 from ._internal import (
     _clear_dap_state,
     _end_session,
@@ -16,15 +17,40 @@ from ._internal import (
 __all__ = ["run", "stop", "connect", "disconnect", "terminate", "restart"]
 
 
-def run(script: str | None = None, *args: str) -> None:
+def run(
+    script: str | None = None,
+    *args: str,
+    stdin: str | None = None,
+    stdout: str | None = None,
+    stderr: str | None = None,
+) -> StopResult | Error:
     """Launch pydevd against `script` and connect to it, e.g. run("script.py", "--foo", "bar").
 
-    If omitted, falls back to the --file (and trailing args) given on the
-    command line at startup.
+    If omitted, `script`/`args` fall back to the --file (and trailing args)
+    given on the command line at startup.
+
+    `stdin`/`stdout`/`stderr` redirect the inferior's streams to files
+    (`stderr="&1"` aliases stdout), gdb-style; any unset stream keeps the
+    default owned-PTY-pair passthrough. Falls back to a previously
+    set("stdin"/"stdout"/"stderr", ...) value if omitted here. Mutually
+    exclusive with `set("pty", ...)`. See doc/io_model.md.
+
+    If a session is already running, it's killed first (gdb-style restart).
     """
-    if SESSION.process is not None:
-        print("error: a session is already running")
-        return
+    return _run([], script, *args, stdin=stdin, stdout=stdout, stderr=stderr)
+
+
+def _run(
+    prefix_lines: list[str],
+    script: str | None,
+    *args: str,
+    stdin: str | None = None,
+    stdout: str | None = None,
+    stderr: str | None = None,
+) -> StopResult | Error:
+    if SESSION.dap is not None or SESSION.process is not None:
+        prefix_lines.append("killing previous instance")
+        _stop_session()
 
     run_ctx = SESSION.run_ctx
     if script is not None:
@@ -32,11 +58,24 @@ def run(script: str | None = None, *args: str) -> None:
         run_ctx.args = list(args)
 
     if run_ctx.args_opt.file is None:
-        print("error: no script given (pass one to run(), or --file at startup)")
-        return
+        return Error("no script given (pass one to run(), or --file at startup)")
+
+    if stdin is not None:
+        run_ctx.args_opt.stdin = stdin
+    if stdout is not None:
+        run_ctx.args_opt.stdout = stdout
+    if stderr is not None:
+        run_ctx.args_opt.stderr = stderr
+
+    if run_ctx.args_opt.pty is not None and (
+        run_ctx.args_opt.stdin is not None
+        or run_ctx.args_opt.stdout is not None
+        or run_ctx.args_opt.stderr is not None
+    ):
+        return Error("--pty conflicts with stdin=/stdout=/stderr= redirection -- unset one")
 
     SESSION.process = _launch.spawn_pydevd(run_ctx, run_ctx.args_opt.pty)
-    print(f"launched pid={SESSION.process.child.pid}")
+    prefix_lines.append(f"launched pid={SESSION.process.child.pid}")
 
     if SESSION.process.master_fd is not None:
         SESSION.reader_thread = threading.Thread(
@@ -45,15 +84,11 @@ def run(script: str | None = None, *args: str) -> None:
         SESSION.reader_thread.start()
 
     # The pydevd server takes a moment to bind its socket after spawning.
-    _connect(retries=25, delay=0.2)
+    return _connect(retries=25, delay=0.2, prefix_lines=prefix_lines)
 
 
-def stop() -> None:
-    """End the session: the pydevd connection and any spawned process share one lifetime."""
-    if SESSION.dap is None and SESSION.process is None:
-        print("error: no active session")
-        return
-
+def _stop_session() -> None:
+    """Tear down the current session: end our process, or ask a remote pydevd to terminate the debuggee."""
     if SESSION.process is None and SESSION.dap is not None:
         # Remote session: ask pydevd to terminate the debuggee on its end.
         try:
@@ -62,22 +97,32 @@ def stop() -> None:
             pass
 
     _end_session()
-    print("session stopped")
 
 
-def connect() -> None:
+def stop() -> Status | Error:
+    """End the session: the pydevd connection and any spawned process share one lifetime."""
+    if SESSION.dap is None and SESSION.process is None:
+        return Error("no active session")
+
+    _stop_session()
+    return Status("session stopped")
+
+
+def connect() -> StopResult | Error:
     """Connect to a remote pydevd DAP server (one we did not spawn ourselves).
 
     Assumes pydevd is already up and listening; for a session started with
     run(), the connect handshake already happened automatically.
     """
-    _connect()
+    return _connect()
 
 
-def _connect(retries: int = 1, delay: float = 0.2) -> None:
+def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | None = None) -> StopResult | Error:
+    if prefix_lines is None:
+        prefix_lines = []
+
     if SESSION.dap is not None:
-        print("error: already connected")
-        return
+        return Error("already connected")
 
     host = SESSION.options.dap_host
     port = SESSION.run_ctx.args_opt.port
@@ -89,11 +134,10 @@ def _connect(retries: int = 1, delay: float = 0.2) -> None:
             break
         except OSError as e:
             if attempt + 1 == retries:
-                print(f"error: could not connect to {host}:{port}: {e}")
-                return
+                return Error(f"could not connect to {host}:{port}: {e}")
             time.sleep(delay)
 
-    client.initialize()
+    SESSION.capabilities = client.initialize()
     client.attach()
     client.wait_for_event("initialized", timeout=5)
 
@@ -109,18 +153,17 @@ def _connect(retries: int = 1, delay: float = 0.2) -> None:
     SESSION.running = True
 
     client.configuration_done()
-    print(f"connected to pydevd on {host}:{port}")
+    prefix_lines.append(f"connected to pydevd on {host}:{port}")
 
     # configurationDone() resumes the debuggee; block for its first stop
     # (initial breakpoint) or exit, same as cont()/step() etc.
-    _wait_for_resume_result(client)
+    return _wait_for_resume_result(client, prefix="\n".join(prefix_lines))
 
 
-def disconnect() -> None:
+def disconnect() -> Status | Error:
     """Detach from the pydevd DAP server, leaving the debuggee running. Local or remote."""
     if SESSION.dap is None:
-        print("error: not connected")
-        return
+        return Error("not connected")
 
     client = SESSION.dap
     client.on_disconnect = None
@@ -130,24 +173,22 @@ def disconnect() -> None:
         pass
     client.close()
     _clear_dap_state()
-    print("disconnected")
+    return Status("disconnected")
 
 
-def terminate() -> None:
+def terminate() -> Status | Error:
     """Ask pydevd to terminate the debuggee via the DAP terminate request. Local or remote."""
     if SESSION.dap is None:
-        print("error: not connected")
-        return
+        return Error("not connected")
     try:
         SESSION.dap.terminate()
     except _dap.DAPError as e:
-        print(f"error: {e}")
-        return
-    print("terminate requested")
+        return Error(str(e))
+    return Status("terminate requested")
 
 
-def restart() -> None:
+def restart() -> StopResult | Error:
     """Restart the debuggee: stop() the current session (if any), then run() again."""
     if SESSION.dap is not None or SESSION.process is not None:
         stop()
-    run()
+    return run()

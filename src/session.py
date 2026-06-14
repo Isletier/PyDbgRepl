@@ -15,6 +15,10 @@ class ReplOptions:
     # REPL frontend: "auto" (ptpython if installed, else plain readline),
     # "ptpython", or "readline".
     ui: str = "auto"
+    # Tab-completion mode (ptpython only): "debugger" (command-aware) or
+    # "classical" (ptpython's normal jedi-based completion). Read live on
+    # every completion request -- no restart needed.
+    completion: str = "debugger"
 
 
 @dataclasses.dataclass
@@ -31,6 +35,9 @@ class SessionState:
     function_breakpoints: list[dict] = dataclasses.field(default_factory=list)
     temporary_breakpoints: set[tuple[str, int]] = dataclasses.field(default_factory=set)
     exception_filters: list[str] = dataclasses.field(default_factory=list)
+    # `initialize` response, e.g. for `exceptionBreakpointFilters` (used by
+    # catch()'s tab-completion).
+    capabilities: dict = dataclasses.field(default_factory=dict)
     displays: list[dict] = dataclasses.field(default_factory=list)
     ptpython_active: bool = False
 
@@ -41,6 +48,6 @@ _options.register(SESSION.run_ctx.args_opt, {
     "vm_type": launch.vm_type_reflection,
     "log_level": launch.log_level_reflection,
     "qt_support": launch.qt_support_reflection,
-})
-_options.register(SESSION.run_ctx.env)
-_options.register(SESSION.options)
+}, name="args_opt")
+_options.register(SESSION.run_ctx.env, name="env")
+_options.register(SESSION.options, name="repl")

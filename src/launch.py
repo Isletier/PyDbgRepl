@@ -84,9 +84,17 @@ class ArgsOptions:
     file: str | None = None
     # External tty device (e.g. "/dev/pts/7") to redirect the inferior's
     # stdin/stdout/stderr to, gdb `tty`-style. None: default owned-PTY-pair
-    # passthrough. Consulted by run(); a no-op for connect(). See
-    # doc/io_model.md.
+    # passthrough. Mutually exclusive with stdin/stdout/stderr below.
+    # Consulted by run(); a no-op for connect(). See doc/io_model.md.
     pty: str | None = None
+    # Per-stream file redirection for the inferior, gdb-style. Each defaults
+    # to the owned-PTY-pair slave when unset. `stderr` additionally accepts
+    # the sentinel "&1" (shell `2>&1`-style: alias stdout's resolved fd).
+    # Mutually exclusive with `pty` above. Consulted by run(); a no-op for
+    # connect(). See doc/io_model.md.
+    stdin: str | None = None
+    stdout: str | None = None
+    stderr: str | None = None
 
 
 @dataclasses.dataclass
@@ -319,17 +327,25 @@ def build_spawn_env(run_ctx: RunContext, source_env: dict[str, str]) -> dict[str
 @dataclasses.dataclass
 class LaunchedProcess:
     child: subprocess.Popen
-    # None when `pty_device` was given: the inferior's stdio is redirected
-    # straight to that external tty and there is nothing on our side to
-    # stream from (see doc/io_model.md).
+    # None when `pty_device` was given, or when stdin/stdout/stderr were all
+    # redirected to files: nothing on our side to stream from/to (see
+    # doc/io_model.md).
     master_fd: int | None
+    # True if the inferior's stdin is the owned-PTY-pair slave (i.e. not
+    # redirected to a file and not `--pty`). Gates _StdinPassthrough.
+    stdin_is_pty: bool = False
 
 
 def spawn_pydevd(run_ctx: RunContext, pty_device: str | None = None) -> LaunchedProcess:
     spawn_argv = build_spawn_argv(run_ctx)
     spawn_env = build_spawn_env(run_ctx, dict(os.environ))
 
+    args_opt = run_ctx.args_opt
+    redirected = args_opt.stdin is not None or args_opt.stdout is not None or args_opt.stderr is not None
+
     if pty_device is not None:
+        if redirected:
+            raise LaunchError("--pty conflicts with stdin=/stdout=/stderr= redirection -- unset one")
         fd = os.open(pty_device, os.O_RDWR)
         try:
             child = subprocess.Popen(
@@ -344,16 +360,47 @@ def spawn_pydevd(run_ctx: RunContext, pty_device: str | None = None) -> Launched
             os.close(fd)
         return LaunchedProcess(child=child, master_fd=None)
 
-    master_fd, slave_fd = pty.openpty()
+    master_fd: int | None = None
+    slave_fd: int | None = None
+    if args_opt.stdin is None or args_opt.stdout is None or args_opt.stderr is None:
+        master_fd, slave_fd = pty.openpty()
+
+    opened_fds = []
+
+    if args_opt.stdin is not None:
+        stdin_fd = os.open(args_opt.stdin, os.O_RDONLY)
+        opened_fds.append(stdin_fd)
+    else:
+        stdin_fd = slave_fd
+
+    if args_opt.stdout is not None:
+        stdout_fd = os.open(args_opt.stdout, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        opened_fds.append(stdout_fd)
+    else:
+        stdout_fd = slave_fd
+
+    if args_opt.stderr == "&1":
+        stderr_fd = os.dup(stdout_fd)
+        opened_fds.append(stderr_fd)
+    elif args_opt.stderr is not None:
+        stderr_fd = os.open(args_opt.stderr, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        opened_fds.append(stderr_fd)
+    else:
+        stderr_fd = slave_fd
+
     try:
         child = subprocess.Popen(
             spawn_argv,
             env=spawn_env,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
+            stdin=stdin_fd,
+            stdout=stdout_fd,
+            stderr=stderr_fd,
             start_new_session=True,
         )
     finally:
-        os.close(slave_fd)
-    return LaunchedProcess(child=child, master_fd=master_fd)
+        if slave_fd is not None:
+            os.close(slave_fd)
+        for fd in opened_fds:
+            os.close(fd)
+
+    return LaunchedProcess(child=child, master_fd=master_fd, stdin_is_pty=args_opt.stdin is None)
