@@ -19,6 +19,11 @@ class ReplOptions:
     # "classical" (ptpython's normal jedi-based completion). Read live on
     # every completion request -- no restart needed.
     completion: str = "debugger"
+    # If True (default), start_eval() drops into an interactive prompt
+    # (ptpython or readline) once the script body finishes. If False
+    # (--batch), the process just exits after the script body runs -- for
+    # unattended automation scenarios. See doc/scenario_mode.md.
+    interactive: bool = True
 
 
 @dataclasses.dataclass

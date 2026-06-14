@@ -10,12 +10,19 @@ Typical wrapper script:
 
     debug.start_eval()
 
-start_eval() injects the REPL commands into __main__ and returns; the wrapper
-script's shebang runs python with -i so the standard interactive prompt (with
-readline/tab-completion bound to __main__) takes over afterwards.
+    # optional: plain Python "scenario" lines go here, e.g. cont(), bt(5), ...
+
+start_eval() injects the REPL commands into __main__ and returns. Any
+scenario lines after it run as a normal script body. Once the script body
+finishes, an interactive prompt (ptpython, or readline via
+code.InteractiveConsole) takes over with __main__'s namespace -- unless
+`interactive` is False (--batch), in which case the process just exits. See
+doc/scenario_mode.md.
 """
 from __future__ import annotations
 
+import atexit
+import code
 import os
 import signal
 import sys
@@ -35,9 +42,17 @@ def process_args_envs(argv: list[str] | None = None, env: dict[str, str] | None 
 
     Does not start anything, even if --file was given (it is just saved to
     RUN_CTX for start_eval()/run() to pick up later).
+
+    `--batch` is consumed here (not forwarded to pydevd): it sets
+    SESSION.options.interactive = False, so start_eval() won't drop into an
+    interactive prompt once the script body finishes.
     """
     argv = sys.argv[1:] if argv is None else argv
     env = os.environ if env is None else env
+
+    if "--batch" in argv:
+        argv = [a for a in argv if a != "--batch"]
+        SESSION.options.interactive = False
 
     try:
         _launch.process_args(SESSION.run_ctx, argv)
@@ -123,13 +138,32 @@ def _embed_ptpython() -> None:
         repl.run()
 
 
+def _embed_readline() -> None:
+    import __main__
+
+    hook = getattr(sys, "__interactivehook__", None)
+    if hook is not None:
+        hook()
+    code.InteractiveConsole(vars(__main__)).interact(banner="", exitmsg="")
+
+
+def _enter_repl() -> None:
+    """Drop into the interactive prompt. Registered with atexit by start_eval()."""
+    if _ptpython_enabled():
+        _embed_ptpython()
+    else:
+        _embed_readline()
+    os._exit(0)
+
+
 def start_eval() -> None:
     """Make REPL commands available and run the inferior first if --file was given.
 
-    Injects the commands into __main__ so that `python -i repl.py` drops into
-    a normal interactive prompt (full readline/tab-completion) with them in scope.
-    If ptpython is enabled (see the "ui" option), it replaces that prompt
-    entirely instead.
+    Injects the commands into __main__, then returns -- any further lines in
+    the wrapper script run as a normal "scenario". Once the script body
+    finishes, an interactive prompt (ptpython, or readline) takes over with
+    __main__'s namespace, unless the "interactive" option is False (--batch),
+    in which case the process just exits.
     """
     signal.signal(signal.SIGINT, _sigint_handler)
 
@@ -142,6 +176,12 @@ def start_eval() -> None:
     for name in _commands_all:
         setattr(__main__, name, getattr(_commands, name))
 
-    if _ptpython_enabled():
-        _embed_ptpython()
-        os._exit(0)
+    if SESSION.options.interactive:
+        # Force concurrent.futures.thread's module-level threading._register_atexit()
+        # call to happen now, while it's still legal. _enter_repl() runs as an
+        # atexit callback itself, and ptpython's async completer lazily imports
+        # this module on first use (to get a ThreadPoolExecutor) -- by then
+        # threading._SHUTTING_DOWN is already True and the registration raises.
+        import concurrent.futures.thread  # noqa: F401
+
+        atexit.register(_enter_repl)

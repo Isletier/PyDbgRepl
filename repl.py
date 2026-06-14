@@ -1,5 +1,5 @@
-#!/usr/bin/env -S python3 -i
-"""Entry point: ./repl.py [pydevd options] [--file script.py [script args...]]"""
+#!/usr/bin/env python3
+"""Entry point: ./repl.py [pydevd options] [--batch] [--file script.py [script args...]]"""
 import sys
 
 import src as debug
@@ -14,3 +14,10 @@ debug.process_args_envs(sys.argv[1:])
 # keybindings.bind("f11", "locals()")
 
 debug.start_eval()
+
+# optional "scenario" lines go here, e.g.:
+# cont()
+# bt(5)
+#
+# Once this script ends, an interactive prompt takes over (unless --batch
+# was given) -- see doc/scenario_mode.md.

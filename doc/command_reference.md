@@ -144,6 +144,14 @@ default) are layered on top of these commands — see `doc/keybindings.md` for
 the extensible binding system and how to customize/disable them.
 
 
+## Scenario / batch mode
+
+`repl.py` can carry plain Python "scenario" lines after `start_eval()`, which
+run before an interactive prompt takes over. `--batch` (or
+`set("interactive", "0")`) skips the prompt entirely for unattended
+automation. See `doc/scenario_mode.md`.
+
+
 ## Out of scope (pydevd has no support at all)
 
 From `doc/dap_scope.md` §8 — no point modeling these as commands:
