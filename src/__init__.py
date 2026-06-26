@@ -19,7 +19,6 @@ code.InteractiveConsole) takes over with __main__'s namespace -- unless
 `interactive` is False (--batch), in which case the process just exits. See
 doc/scenario_mode.md.
 """
-from __future__ import annotations
 
 import atexit
 import code
@@ -177,11 +176,4 @@ def start_eval() -> None:
         setattr(__main__, name, getattr(_commands, name))
 
     if SESSION.options.interactive:
-        # Force concurrent.futures.thread's module-level threading._register_atexit()
-        # call to happen now, while it's still legal. _enter_repl() runs as an
-        # atexit callback itself, and ptpython's async completer lazily imports
-        # this module on first use (to get a ThreadPoolExecutor) -- by then
-        # threading._SHUTTING_DOWN is already True and the registration raises.
-        import concurrent.futures.thread  # noqa: F401
-
-        atexit.register(_enter_repl)
+        _enter_repl()

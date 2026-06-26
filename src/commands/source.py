@@ -2,10 +2,10 @@
 from ._display import Error, SourceLines
 from ._internal import _current_location
 
-__all__ = ["list", "l"]
+__all__ = ["ls", "l"]
 
 
-def list(first: int | None = None, last: int | None = None) -> SourceLines | Error:
+def ls(first: int | None = None, last: int | None = None) -> SourceLines | Error:
     """Lines from the current file.
 
     No args: ~10 lines centered on the current line. `first` only: a window
@@ -40,4 +40,4 @@ def list(first: int | None = None, last: int | None = None) -> SourceLines | Err
     )
 
 
-l = list
+l = ls
