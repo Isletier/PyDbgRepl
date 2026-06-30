@@ -1,6 +1,6 @@
 """Breakpoints: breakpoint, clear, catch, tbreak, enable/disable, ignore, funcbreak."""
 from .. import dap as _dap
-from ..session import SESSION
+from pdvp.session import SESSION
 from . import _internal
 from ._display import Breakpoints, Error, Status
 from ._internal import _resolve_path_line

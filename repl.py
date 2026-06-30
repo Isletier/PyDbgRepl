@@ -2,9 +2,9 @@
 """Entry point: ./repl.py [pydevd options] [--batch] [--file script.py [script args...]]"""
 import sys
 
-import src as debug
+import pdvp
 
-debug.process_args_envs(sys.argv[1:])
+pdvp.process_args_envs(sys.argv[1:])
 
 # user customization goes here, e.g.:
 # debug.set("log_level", "debug")
@@ -13,7 +13,7 @@ debug.process_args_envs(sys.argv[1:])
 # keybindings.unbind("f12")
 # keybindings.bind("f11", "locals()")
 
-debug.start_eval()
+pdvp.start_eval()
 
 # optional "scenario" lines go here, e.g.:
 # cont()
