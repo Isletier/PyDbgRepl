@@ -25,6 +25,14 @@ class ReplOptions:
     # unattended automation scenarios. See doc/scenario_mode.md.
     interactive: bool = True
 
+@dataclasses.dataclass
+class Breakpoints:
+    "Internal Registry for breakpoints"
+    breakpoints: dict[str, list[dict]] = dataclasses.field(default_factory=dict)
+    function_breakpoints: list[dict] = dataclasses.field(default_factory=list)
+    temporary_breakpoints: set[tuple[str, int]] = dataclasses.field(default_factory=set)
+    exception_filters: list[str] = dataclasses.field(default_factory=list)
+
 
 @dataclasses.dataclass
 class SessionState:

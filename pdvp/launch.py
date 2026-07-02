@@ -388,6 +388,7 @@ def spawn_pydevd(run_ctx: RunContext, pty_device: str | None = None) -> Launched
     else:
         stderr_fd = slave_fd
 
+    print(spawn_argv);
     try:
         child = subprocess.Popen(
             spawn_argv,

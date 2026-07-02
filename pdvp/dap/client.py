@@ -81,6 +81,7 @@ class DAPClient:
         with self._pending_lock:
             self._pending[seq] = (event, holder)
 
+        print(message)
         self._transport.send(message)
 
         if not event.wait(timeout):
@@ -91,6 +92,8 @@ class DAPClient:
         response = holder["response"]
         if not response.get("success", False):
             raise DAPError(response.get("message") or f"'{command}' request failed")
+
+        print(response.get("body"))
         return response.get("body") or {}
 
     def wait_for_event(self, event_name: str, timeout: float | None = None) -> dict:
@@ -111,6 +114,7 @@ class DAPClient:
             while True:
                 try:
                     message = self.events.get(timeout=timeout)
+                    print(message)
                 except queue.Empty:
                     raise DAPError(f"timed out waiting for one of {sorted(event_names)!r}")
                 if message.get("event") in event_names:
