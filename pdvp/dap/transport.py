@@ -17,11 +17,11 @@ class DAPTransport:
         header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
         self._sock.sendall(header + body)
 
-    def recv(self) -> dict:
+    def recv(self) -> str:
         header = self._read_header()
         length = self._parse_content_length(header)
         body = self._read_exact(length)
-        return json.loads(body.decode("utf-8"))
+        return body.decode("utf-8"))
 
     def close(self) -> None:
         self._sock.close()

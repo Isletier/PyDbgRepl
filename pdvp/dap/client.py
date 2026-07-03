@@ -5,6 +5,7 @@ Covers the v1 request/event subset documented in doc/dap_scope.md.
 import json
 import queue
 import threading
+import pdvp.schema.pydevd_schema as schema
 from typing import Callable
 
 from .transport import DAPTransport
@@ -61,6 +62,7 @@ class DAPClient:
             self.on_disconnect()
 
     def _handle_response(self, message: dict) -> None:
+        schema.SetBreakpointsRequest()
         with self._pending_lock:
             pending = self._pending.pop(message["request_seq"], None)
         if pending is None:
@@ -69,12 +71,10 @@ class DAPClient:
         holder["response"] = message
         event.set()
 
-    def request(self, command: str, arguments: dict | None = None, timeout: float | None = None) -> dict:
+    def request(self, message: schema.Request, timeout: float | None = None) -> dict:
         """Send a request and block for its response body. Raises DAPError on failure/timeout."""
         seq = self._next_seq()
-        message: dict = {"seq": seq, "type": "request", "command": command}
-        if arguments is not None:
-            message["arguments"] = arguments
+        message.seq = seq
 
         event = threading.Event()
         holder: dict = {}
@@ -82,7 +82,7 @@ class DAPClient:
             self._pending[seq] = (event, holder)
 
         print(message)
-        self._transport.send(message)
+        self._transport.send(message.to_dict())
 
         if not event.wait(timeout):
             with self._pending_lock:
@@ -128,18 +128,29 @@ class DAPClient:
     # ---- session lifecycle ----
 
     def initialize(self, **kwargs) -> dict:
-        arguments = {
-            "clientID": "pydev-repl",
-            "clientName": "pydev-repl",
-            "adapterID": "pydevd",
-            "pathFormat": "path",
-            "linesStartAt1": True,
-            "columnsStartAt1": True,
-            "supportsVariableType": True,
-            "supportsRunInTerminalRequest": False,
-            **kwargs,
-        }
-        return self.request("initialize", arguments)
+#        arguments = {
+#            "clientID": "pydev-repl",
+#            "clientName": "pydev-repl",
+#            "adapterID": "pydevd",
+#            "pathFormat": "path",
+#            "linesStartAt1": True,
+#            "columnsStartAt1": True,
+#            "supportsVariableType": True,
+#            "supportsRunInTerminalRequest": False,
+#            **kwargs,
+#        }
+        initRequest = schema.InitializeRequest(schema.InitializeRequestArguments(
+            adapterID = "pdvp",
+            ClientID = "pdvp",
+            ClientName = "pdvp",
+            pathFormat = "path",
+            linesStartAt1 = True,
+            columnsStartAt1 = True,
+            supportVariableType = True,
+            supportRunInTerminalRequest = True
+        ))
+
+        return self.request(initRequest)
 
     def attach(self, **arguments) -> dict:
         return self.request("attach", arguments)
