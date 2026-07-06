@@ -12,16 +12,17 @@ class DAPTransport:
     def connect(cls, host: str, port: int) -> "DAPTransport":
         return cls(socket.create_connection((host, port)))
 
-    def send(self, message: dict) -> None:
-        body = json.dumps(message).encode("utf-8")
-        header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-        self._sock.sendall(header + body)
+    def send(self, message: bytes) -> None:
+        print(message.decode("utf-8"))
+        header = f"Content-Length: {len(message)}\r\n\r\n".encode("ascii")
+        self._sock.sendall(header + message)
 
     def recv(self) -> str:
         header = self._read_header()
         length = self._parse_content_length(header)
-        body = self._read_exact(length)
-        return body.decode("utf-8"))
+        body = self._read_exact(length).decode("utf-8")
+        print(body)
+        return body
 
     def close(self) -> None:
         self._sock.close()

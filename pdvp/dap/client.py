@@ -5,26 +5,32 @@ Covers the v1 request/event subset documented in doc/dap_scope.md.
 import json
 import queue
 import threading
-import pdvp.schema.pydevd_schema as schema
 from typing import Callable
 
 from .transport import DAPTransport
-
+import pdvp.schema.pydevd_schema as dap
+import pdvp.schema.pydevd_base_schema as dap_base
 
 class DAPError(Exception):
     pass
 
 
+
 class DAPClient:
     def __init__(self, transport: DAPTransport):
         self._transport = transport
+
         self._seq = 0
         self._seq_lock = threading.Lock()
-        self._pending: dict[int, tuple[threading.Event, dict]] = {}
+
+        self._pending: dict[int, tuple[threading.Event, dap.Response | None]] = {}
         self._pending_lock = threading.Lock()
+
         self.events: queue.Queue[dict] = queue.Queue()
         self.on_event: Callable[[dict], None] | None = None
+
         self.on_disconnect: Callable[[], None] | None = None
+
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._reader_thread.start()
 
@@ -33,6 +39,8 @@ class DAPClient:
         return cls(DAPTransport.connect(host, port))
 
     def close(self) -> None:
+        if self.on_disconnect is not None:
+            self.on_disconnect()
         self._transport.close()
 
     def _next_seq(self) -> int:
@@ -43,58 +51,46 @@ class DAPClient:
     def _read_loop(self) -> None:
         while True:
             try:
-                message = self._transport.recv()
-            except (ConnectionError, OSError):
-                break
-            except json.JSONDecodeError:
-                # pydevd occasionally sends a stray legacy (non-JSON) command
-                # through the same Content-Length framing, e.g. an internal
-                # "Console" pseudo-thread suspend notification. Ignore it.
-                continue
-            if message.get("type") == "response":
+                responce_str = self._transport.recv()
+                message : dap.ProtocolMessage = dap_base.from_json(responce_str)
+            except Exception as e:
+                self.close()
+                raise e
+
+            if message.type == "response":
                 self._handle_response(message)
-            elif message.get("type") == "event":
+            elif message.type == "event":
                 self.events.put(message)
                 if self.on_event is not None:
                     self.on_event(message)
-            # adapter->client reverse requests are out of scope for v1
-        if self.on_disconnect is not None:
-            self.on_disconnect()
+            else:
+                raise DAPError()
 
-    def _handle_response(self, message: dict) -> None:
-        schema.SetBreakpointsRequest()
+    def _handle_response(self, responce: dap.Response) -> None:
+        # a server side seq handling should be processed
         with self._pending_lock:
-            pending = self._pending.pop(message["request_seq"], None)
-        if pending is None:
-            return
-        event, holder = pending
-        holder["response"] = message
-        event.set()
+            event, _ = self._pending.get(responce.request_seq, None)
+            self._pending[responce.request_seq] = responce
+            event.set()
 
-    def request(self, message: schema.Request, timeout: float | None = None) -> dict:
+
+    def request(self, request: dap.Request, timeout: float | None = None) -> dap.Response:
         """Send a request and block for its response body. Raises DAPError on failure/timeout."""
-        seq = self._next_seq()
-        message.seq = seq
+        request.seq = self._next_seq()
 
         event = threading.Event()
-        holder: dict = {}
         with self._pending_lock:
-            self._pending[seq] = (event, holder)
+            self._pending[request.seq] = (event, None)
 
-        print(message)
-        self._transport.send(message.to_dict())
+        self._transport.send(request.to_json().encode("utf-8"))
 
         if not event.wait(timeout):
-            with self._pending_lock:
-                self._pending.pop(seq, None)
             raise DAPError(f"timed out waiting for response to '{command}'")
 
-        response = holder["response"]
-        if not response.get("success", False):
-            raise DAPError(response.get("message") or f"'{command}' request failed")
+        with self._pending_lock:
+            resp = self._pending.pop(request.seq, None)
 
-        print(response.get("body"))
-        return response.get("body") or {}
+        return resp
 
     def wait_for_event(self, event_name: str, timeout: float | None = None) -> dict:
         """Block until an event named `event_name` arrives. Other events are kept in order.
@@ -127,19 +123,8 @@ class DAPClient:
 
     # ---- session lifecycle ----
 
-    def initialize(self, **kwargs) -> dict:
-#        arguments = {
-#            "clientID": "pydev-repl",
-#            "clientName": "pydev-repl",
-#            "adapterID": "pydevd",
-#            "pathFormat": "path",
-#            "linesStartAt1": True,
-#            "columnsStartAt1": True,
-#            "supportsVariableType": True,
-#            "supportsRunInTerminalRequest": False,
-#            **kwargs,
-#        }
-        initRequest = schema.InitializeRequest(schema.InitializeRequestArguments(
+    def initialize(self, **kwargs) -> dap.InitializeResponse:
+        initRequest = dap.InitializeRequest(dap.InitializeRequestArguments(
             adapterID = "pdvp",
             ClientID = "pdvp",
             ClientName = "pdvp",
@@ -152,57 +137,64 @@ class DAPClient:
 
         return self.request(initRequest)
 
-    def attach(self, **arguments) -> dict:
-        return self.request("attach", arguments)
+    def attach(self, **arguments) -> dap.AttachResponse:
+        attach_req = dap.AttachRequest(arguments=dap.AttachRequestArguments(arguments))
+        return self.request(attach_req)
 
-    def configuration_done(self) -> dict:
-        return self.request("configurationDone")
+    def configuration_done(self) -> dap.ConfigurationDoneResponse:
+        conf_done_req = dap.ConfigurationDoneRequest(arguments=dap.ConfigurationDoneArguments())
+        return self.request(conf_done_req)
 
-    def disconnect(self, terminate_debuggee: bool | None = None) -> dict:
-        arguments = {}
-        if terminate_debuggee is not None:
-            arguments["terminateDebuggee"] = terminate_debuggee
-        return self.request("disconnect", arguments)
+    def disconnect(self, terminate_debuggee: bool | None = None) -> dap.DisconnectResponse:
+        disconnect_req = dap.DisconnectRequest(arguments=dap.DisconnectArguments(terminateDebuggee=terminate_debuggee))
+        return self.request(disconnect_req)
 
-    def terminate(self, restart: bool | None = None) -> dict:
-        arguments = {}
-        if restart is not None:
-            arguments["restart"] = restart
-        return self.request("terminate", arguments)
+    def terminate(self, restart: bool | None = None) -> dap.TerminateResponse:
+        terminate_req = dap.TerminateRequest(arguments=dap.TerminateArguments(restart))
+        return self.request(terminate_req)
 
     # ---- execution control ----
 
-    def continue_(self, thread_id: int, single_thread: bool = False) -> dict:
-        return self.request("continue", {"threadId": thread_id, "singleThread": single_thread})
+    def continue_(self, thread_id: int, single_thread: bool = False) -> dap.ContinueResponse:
+        cont_req = dap.ContinueRequest(arguments=dap.ContinueArguments(
+            thread_id,
+            single_thread
+        ))
 
-    def next(self, thread_id: int, single_thread: bool = False, granularity: str | None = None) -> dict:
-        arguments = {"threadId": thread_id, "singleThread": single_thread}
-        if granularity is not None:
-            arguments["granularity"] = granularity
-        return self.request("next", arguments)
+        return self.request(cont_req)
 
-    def step_in(
-        self,
-        thread_id: int,
-        single_thread: bool = False,
-        target_id: int | None = None,
-        granularity: str | None = None,
-    ) -> dict:
-        arguments = {"threadId": thread_id, "singleThread": single_thread}
-        if target_id is not None:
-            arguments["targetId"] = target_id
-        if granularity is not None:
-            arguments["granularity"] = granularity
-        return self.request("stepIn", arguments)
+    def next(self, thread_id: int, single_thread: bool = False, granularity: str | None = None) -> dap.ContinueResponse:
+        next_req = dap.NextRequest(arguments=dap.NextArguments(
+            thread_id,
+            single_thread,
+            granularity
+        ))
 
-    def step_out(self, thread_id: int, single_thread: bool = False, granularity: str | None = None) -> dict:
-        arguments = {"threadId": thread_id, "singleThread": single_thread}
-        if granularity is not None:
-            arguments["granularity"] = granularity
-        return self.request("stepOut", arguments)
+        return self.request(next_req)
+
+    def step_in(self, thread_id: int, single_thread: bool = False, target_id: int | None = None, granularity: str | None = None) -> dap.StepInResponse:
+        stepIn_req = dap.StepInRequest(arguments=dap.StepInArguments(
+            thread_id,
+            single_thread,
+            target_id,
+            granularity
+        ))
+
+        return self.request(stepIn_req)
+
+    def step_out(self, thread_id: int, single_thread: bool = False, granularity: str | None = None) -> dap.StepOutResponse:
+        stepOut_req = dap.StepOutRequest(arguments=dap.StepOutArguments(
+            thread_id,
+            single_thread,
+            granularity
+        ))
+        return self.request(stepOut_req)
 
     def pause(self, thread_id: int) -> dict:
-        return self.request("pause", {"threadId": thread_id})
+        pause_req = dap.PauseRequest(arguments=dap.PauseArguments(
+            thread_id
+        ))
+        return self.request(pause_req)
 
     # ---- inspection ----
 
