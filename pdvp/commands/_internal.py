@@ -169,7 +169,7 @@ def _wait_for_resume_result(client: _dap.DAPClient, prefix: str = "") -> StopRes
         passthrough.start()
 
     try:
-        message = client.wait_for_any_event(_RESUME_RESULT_EVENTS)
+        message = client.wait_for_events(_RESUME_RESULT_EVENTS)
     finally:
         if passthrough is not None:
             passthrough.stop()

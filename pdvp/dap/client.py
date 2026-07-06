@@ -5,6 +5,7 @@ Covers the v1 request/event subset documented in doc/dap_scope.md.
 import json
 import queue
 import threading
+from enum import StrEnum
 from typing import Callable
 
 from .transport import DAPTransport
@@ -14,7 +15,24 @@ import pdvp.schema.pydevd_base_schema as dap_base
 class DAPError(Exception):
     pass
 
-
+class dap_event_name(StrEnum):
+    INITIALIZED     = "initialized",
+    STOPPED         = "stopped",
+    CONTINUED       = "continued",
+    EXITED          = "exited",
+    TERMINATED      = "terminated",
+    THREAD          = "thread",
+    OUTPUT          = "output",
+    BREAKPOINT      = "breakpoint",
+    MODULE          = "module",
+    LOADEDSOURCE    = "loadedsource",
+    PROCESS         = "process",
+    CAPABILITIES    = "capabilities",
+    PROGRESSSTART   = "progressstart",
+    PROGRESSUPDATE  = "progressupdate",
+    PROGRESSEND     = "progressend",
+    INVALIDATED     = "invalidated",
+    MEMORY          = "memory"
 
 class DAPClient:
     def __init__(self, transport: DAPTransport):
@@ -92,34 +110,35 @@ class DAPClient:
 
         return resp
 
-    def wait_for_event(self, event_name: str, timeout: float | None = None) -> dict:
+    def wait_for_event(self, event_name: dap_event_name, timeout: float | None = None) -> dap.Event:
         """Block until an event named `event_name` arrives. Other events are kept in order.
 
         Raises DAPError on timeout.
         """
-        return self.wait_for_any_event({event_name}, timeout)["body"]
 
-    def wait_for_any_event(self, event_names: set[str], timeout: float | None = None) -> dict:
+        return self.wait_for_events({event_name}, timeout)
+
+    def wait_for_events(self, event_names: set[dap_event_name], timeout: float | None = None) -> dap.Event:
         """Block until an event whose name is in `event_names` arrives.
 
         Returns the full message (with "event" and "body" keys). Other events
         are kept in order. Raises DAPError on timeout.
         """
+
         deferred = []
         try:
             while True:
                 try:
-                    message = self.events.get(timeout=timeout)
-                    print(message)
+                    event: dap.Event = self.events.get(timeout=timeout)
+                    print(event)
                 except queue.Empty:
                     raise DAPError(f"timed out waiting for one of {sorted(event_names)!r}")
-                if message.get("event") in event_names:
-                    message["body"] = message.get("body") or {}
-                    return message
-                deferred.append(message)
+                if event.event in event_names:
+                    return event
+                deferred.append(event)
         finally:
-            for message in deferred:
-                self.events.put(message)
+            for event in deferred:
+                self.events.put(event)
 
     # ---- session lifecycle ----
 
@@ -190,7 +209,7 @@ class DAPClient:
         ))
         return self.request(stepOut_req)
 
-    def pause(self, thread_id: int) -> dict:
+    def pause(self, thread_id: int) -> dap.PauseResponse:
         pause_req = dap.PauseRequest(arguments=dap.PauseArguments(
             thread_id
         ))
@@ -198,49 +217,78 @@ class DAPClient:
 
     # ---- inspection ----
 
-    def threads(self) -> dict:
-        return self.request("threads")
+    def threads(self) -> dap.ThreadsResponse:
+        return self.request(dap.ThreadsRequest())
 
-    def stack_trace(self, thread_id: int, start_frame: int | None = None, levels: int | None = None) -> dict:
-        arguments = {"threadId": thread_id}
-        if start_frame is not None:
-            arguments["startFrame"] = start_frame
-        if levels is not None:
-            arguments["levels"] = levels
-        return self.request("stackTrace", arguments)
+    def stack_trace(self, thread_id: int, start_frame: int | None = None, levels: int | None = None) -> dap.StackTraceResponse:
+        stack_trace_req = dap.StackTraceRequest(arguments=dap.StackTraceArguments(
+            thread_id,
+            start_frame,
+            levels,
+            format=None
+        ))
 
-    def scopes(self, frame_id: int) -> dict:
-        return self.request("scopes", {"frameId": frame_id})
+        return self.request(stack_trace_req)
 
-    def variables(self, variables_reference: int, **kwargs) -> dict:
-        return self.request("variables", {"variablesReference": variables_reference, **kwargs})
+    def scopes(self, frame_id: int) -> dap.ScopesResponse:
+        scopes_req = dap.ScopesRequest(arguments=dap.ScopesArguments(
+            frame_id
+        ))
 
-    def set_variable(self, variables_reference: int, name: str, value: str) -> dict:
-        return self.request(
-            "setVariable",
-            {"variablesReference": variables_reference, "name": name, "value": value},
-        )
+        return self.request(scopes_req)
 
-    def set_expression(self, expression: str, value: str, frame_id: int | None = None) -> dict:
-        arguments = {"expression": expression, "value": value}
-        if frame_id is not None:
-            arguments["frameId"] = frame_id
-        return self.request("setExpression", arguments)
+    def variables(self, variables_reference: int, **kwargs) -> dap.VariablesResponse:
+        variables_req = dap.VariablesRequest(arguments=dap.VariablesArguments(
+            variables_reference,
+            filter=None,
+            start=None,
+            count=None,
+            format=None
+        ))
 
-    def evaluate(self, expression: str, frame_id: int | None = None, context: str | None = None) -> dict:
-        arguments = {"expression": expression}
-        if frame_id is not None:
-            arguments["frameId"] = frame_id
-        if context is not None:
-            arguments["context"] = context
-        return self.request("evaluate", arguments)
+        return self.request(variables_req)
 
-    def exception_info(self, thread_id: int) -> dict:
-        return self.request("exceptionInfo", {"threadId": thread_id})
+    def set_variable(self, variables_reference: int, name: str, value: str) -> dap.SetVariableResponse:
+        set_variable_req = dap.SetVariableRequest(arguments=dap.SetVariableArguments(
+            variables_reference,
+            name,
+            value,
+            format=None
+        ))
+
+        return self.request(set_variable_req)
+
+    def set_expression(self, expression: str, value: str, frame_id: int | None = None) -> dap.SetExpressionResponse:
+        set_expr_req = dap.SetExpressionRequest(arguments=dap.SetExpressionArguments(
+            expression,
+            value,
+            frame_id,
+            format=None
+        ))
+
+        return self.request(set_expr_req)
+
+    def evaluate(self, expression: str, frame_id: int | None = None, context: str | None = None) -> dap.EvaluateResponse:
+        evaluate_req = dap.EvaluateRequest(arguments=dap.EvaluateArguments(
+            expression,
+            frame_id,
+            context,
+            format=None
+        ))
+
+        return self.request(evaluate_req)
+
+    def exception_info(self, thread_id: int) -> dap.ExceptionInfoResponse:
+        exception_info_req = dap.ExceptionInfoRequest(arguments=dap.ExceptionInfoArguments(
+            thread_id
+        ))
+
+        return self.request(exception_info_req)
 
     # ---- breakpoints ----
 
     def set_breakpoints(self, source: dict, breakpoints: list[dict] | None = None) -> dict:
+        set_breakpoints_req = dap.SetBreakpointsRequest(arguments=dap.SetBreakpointsArguments(source, breakpoints,
         arguments = {"source": source}
         if breakpoints is not None:
             arguments["breakpoints"] = breakpoints
