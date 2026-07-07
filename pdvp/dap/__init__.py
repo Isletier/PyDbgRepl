@@ -2,4 +2,4 @@
 from .client import DAPClient, DAPError
 from .transport import DAPTransport
 
-__all__ = ["DAPClient", "DAPError", "DAPTransport"]
+__all__ = ["DAPClient", "DAPError", "DAPTransport", "dap_event_name"]

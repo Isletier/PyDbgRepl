@@ -130,7 +130,6 @@ class DAPClient:
             while True:
                 try:
                     event: dap.Event = self.events.get(timeout=timeout)
-                    print(event)
                 except queue.Empty:
                     raise DAPError(f"timed out waiting for one of {sorted(event_names)!r}")
                 if event.event in event_names:
@@ -287,73 +286,121 @@ class DAPClient:
 
     # ---- breakpoints ----
 
-    def set_breakpoints(self, source: dict, breakpoints: list[dict] | None = None) -> dict:
-        set_breakpoints_req = dap.SetBreakpointsRequest(arguments=dap.SetBreakpointsArguments(source, breakpoints,
-        arguments = {"source": source}
-        if breakpoints is not None:
-            arguments["breakpoints"] = breakpoints
-        return self.request("setBreakpoints", arguments)
+    def set_breakpoints(self, source: dap.Source, breakpoints: list[dap.Breakpoint]) -> dap.SetBreakpointsResponse:
+        set_breakpoints_req = dap.SetBreakpointsRequest(arguments=dap.SetBreakpointsArguments(
+            source,
+            breakpoints,
+            lines=None,
+            sourceModified=False
+        ))
 
-    def set_function_breakpoints(self, breakpoints: list[dict]) -> dict:
-        return self.request("setFunctionBreakpoints", {"breakpoints": breakpoints})
+        return self.request(set_breakpoints_req)
 
-    def set_exception_breakpoints(self, filters: list[str], filter_options: list[dict] | None = None) -> dict:
-        arguments = {"filters": filters}
-        if filter_options is not None:
-            arguments["filterOptions"] = filter_options
-        return self.request("setExceptionBreakpoints", arguments)
+    def set_function_breakpoints(self, fbreakpoints: list[dap.FunctionBreakpoint]) -> dap.SetFunctionBreakpointsResponse:
+        set_function_breakpoints_req = dap.SetFunctionBreakpointsRequest(arguments=dap.SetFunctionBreakpointsArguments(
+            fbreakpoints
+        ))
+
+        return self.request(set_function_breakpoints_req)
+
+    def set_exception_breakpoints(self,
+            filters: list[str],
+            filter_options: list[dap.ExceptionFilterOptions],
+            exception_options: list[dap.ExceptionOptions]
+        ) -> dap.SetExceptionBreakpointsResponse:
+
+        set_exception_breakpoints_req = dap.SetExceptionBreakpointsRequest(arguments=dap.SetExceptionBreakpointsArguments(
+            filters,
+            filter_options,
+            exception_options
+        ))
+
+        return self.request(set_exception_breakpoints_req)
 
     # ---- execution control extras ----
 
-    def step_in_targets(self, frame_id: int) -> dict:
-        return self.request("stepInTargets", {"frameId": frame_id})
+    def step_in_targets(self, frame_id: int) -> dap.StepInTargetsResponse:
+        step_in_targets_req = dap.StepInTargetsRequest(arguments=dap.StepInTargetsArguments(
+            frame_id
+        ))
 
-    def goto_targets(self, source: dict, line: int, column: int | None = None) -> dict:
-        arguments = {"source": source, "line": line}
-        if column is not None:
-            arguments["column"] = column
-        return self.request("gotoTargets", arguments)
+        return self.request(step_in_targets_req)
 
-    def goto(self, thread_id: int, target_id: int) -> dict:
-        return self.request("goto", {"threadId": thread_id, "targetId": target_id})
+    def goto_targets(self, source: dap.Source, line: int, column: int | None = None) -> dap.GotoTargetsResponse:
+        goto_targets_req = dap.GotoTargetsRequest(arguments=dap.GotoTargetsArguments(
+            source,
+            line,
+            column
+        ))
+
+        return self.request(goto_targets_req)
+
+    def goto(self, thread_id: int, target_id: int) -> dap.GotoResponse:
+        goto_req = dap.GotoRequest(arguments=dap.GotoArguments(
+            thread_id,
+            target_id
+        ))
+
+        return self.request(goto_req)
 
     # ---- inspection extras ----
 
-    def completions(self, text: str, column: int, frame_id: int | None = None, line: int | None = None) -> dict:
-        arguments = {"text": text, "column": column}
-        if frame_id is not None:
-            arguments["frameId"] = frame_id
-        if line is not None:
-            arguments["line"] = line
-        return self.request("completions", arguments)
+    def completions(self, text: str, column: int, frame_id: int | None = None, line: int | None = None) -> dap.CompletionsResponse:
+        completeions_req = dap.CompletionsRequest(arguments=dap.CompletionsArguments(
+            text,
+            column,
+            frame_id,
+            line
+        ))
 
-    def source(self, source_reference: int, source: dict | None = None) -> dict:
-        arguments = {"sourceReference": source_reference}
-        if source is not None:
-            arguments["source"] = source
-        return self.request("source", arguments)
+        return self.request(completeions_req)
 
-    def modules(self, start_module: int | None = None, module_count: int | None = None) -> dict:
-        arguments = {}
-        if start_module is not None:
-            arguments["startModule"] = start_module
-        if module_count is not None:
-            arguments["moduleCount"] = module_count
-        return self.request("modules", arguments)
+    def source(self, source_reference: int, source: dap.Source | None) -> dap.SourceResponse:
+        source_req = dap.SourceRequest(arguments=dap.SourceArguments(
+            source_reference,
+            source
+        ))
+
+        return self.request(source_req)
+
+    def modules(self, start_module: int | None = None, module_count: int | None = None) -> dap.ModulesResponse:
+        modules_req = dap.ModulesRequest(arguments=dap.ModulesArguments(
+            start_module,
+            module_count
+        ))
+
+        return self.request(modules_req)
 
     # ---- pydevd-specific extensions ----
 
-    def pydevd_authorize(self, debug_server_access_token: str | None = None) -> dict:
-        arguments = {}
-        if debug_server_access_token is not None:
-            arguments["debugServerAccessToken"] = debug_server_access_token
-        return self.request("pydevdAuthorize", arguments)
+    def pydevd_authorize(self, debug_server_access_token: str | None = None) -> dap.PydevdAuthorizeResponse:
+        pydevd_authorize_req = dap.PydevdAuthorizeRequest(arguments=dap.PydevdAuthorizeArguments(
+            debug_server_access_token
+        ))
 
-    def pydevd_system_info(self) -> dict:
-        return self.request("pydevdSystemInfo")
+        return self.request(pydevd_authorize_req)
 
-    def set_debugger_property(self, **kwargs) -> dict:
-        return self.request("setDebuggerProperty", kwargs)
+    def pydevd_system_info(self) -> dap.PydevdSystemInfoResponse:
+        pydevd_system_info_req = dap.PydevdSystemInfoRequest(arguments=dap.PydevdSystemInfoArguments())
+        return self.request(pydevd_system_info_req)
 
-    def set_pydevd_source_map(self, source: dict, pydevd_source_maps: list[dict]) -> dict:
-        return self.request("setPydevdSourceMap", {"source": source, "pydevdSourceMaps": pydevd_source_maps})
+    def set_debugger_property(self) -> dap.SetDebuggerPropertyResponse:
+        set_debugger_property_req = dap.SetDebuggerPropertyRequest(arguments=dap.SetDebuggerPropertyArguments(
+            ideOS=None,
+            dontTraceStartPatterns=None,
+            dontTraceEndPatterns=None,
+            skipSuspendOnBreakpointException=None,
+            skipPrintBreakpointException=None,
+            multiThreadsSingleNotification=None
+        ))
+
+        return self.request(set_debugger_property)
+
+    def set_pydevd_source_map(self, source: dict, pydevd_source_maps: list[dap.PydevdSourceMap]) -> dap.SetPydevdSourceMapResponse:
+        set_pydevd_source_map_req = dap.SetPydevdSourceMapRequest(arguments=dap.SetPydevdSourceMapArguments(
+            source,
+            pydevdSourceMaps
+        ))
+
+        return self.request(set_pydevd_source_map_req)
+

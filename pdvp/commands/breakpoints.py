@@ -68,7 +68,7 @@ def catch(*filters: str) -> Status:
     """Set exception breakpoint filters, e.g. catch("raised", "uncaught")."""
     SESSION.exception_filters = list(filters)
     if SESSION.dap is not None:
-        SESSION.dap.set_exception_breakpoints(SESSION.exception_filters)
+        SESSION.dap.set_exception_breakpoints(SESSION.exception_filters, [], [])
     return Status(f"exception filters = {SESSION.exception_filters}")
 
 

@@ -64,6 +64,6 @@ def attach_and_configure(client: DAPClient, breakpoints: dict | None = None, exc
         for source_path, bps in breakpoints.items():
             client.set_breakpoints({"path": source_path}, bps)
 
-    client.set_exception_breakpoints(exception_filters or [])
+    client.set_exception_breakpoints(exception_filters or [], [], [])
     client.configuration_done()
     return caps

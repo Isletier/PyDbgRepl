@@ -98,7 +98,7 @@ def test_function_breakpoints(port: int) -> None:
         client.wait_for_event("initialized", timeout=5)
 
         client.set_function_breakpoints([{"name": "inner"}])
-        client.set_exception_breakpoints([])
+        client.set_exception_breakpoints([], [], [])
         client.configuration_done()
 
         stopped = client.wait_for_event("stopped", timeout=10)

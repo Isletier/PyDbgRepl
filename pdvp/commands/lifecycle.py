@@ -146,7 +146,7 @@ def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | Non
         client.set_breakpoints({"path": path}, sent)
     if SESSION.function_breakpoints:
         client.set_function_breakpoints(SESSION.function_breakpoints)
-    client.set_exception_breakpoints(SESSION.exception_filters)
+    client.set_exception_breakpoints(SESSION.exception_filters, [], [])
 
     client.on_disconnect = _on_dap_disconnect
     SESSION.dap = client
