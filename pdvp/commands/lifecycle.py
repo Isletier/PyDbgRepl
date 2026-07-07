@@ -130,7 +130,7 @@ def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | Non
     client = None
     for attempt in range(retries):
         try:
-            client = _dap.DAPClient.connect(host, port)
+            client = _dap.Client.connect(host, port)
             break
         except OSError as e:
             if attempt + 1 == retries:

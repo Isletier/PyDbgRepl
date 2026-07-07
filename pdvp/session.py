@@ -4,7 +4,7 @@ import threading
 
 from . import launch
 from . import options as _options
-from .dap import DAPClient
+from .dap import Client
 
 
 @dataclasses.dataclass
@@ -40,7 +40,7 @@ class SessionState:
     options: ReplOptions = dataclasses.field(default_factory=ReplOptions)
     process: launch.LaunchedProcess | None = None
     reader_thread: threading.Thread | None = None
-    dap: DAPClient | None = None
+    dap: Client | None = None
     running: bool = False
     current_thread_id: int | None = None
     current_frame_id: int | None = None

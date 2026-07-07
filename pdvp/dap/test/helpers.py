@@ -4,7 +4,7 @@ import os
 import time
 
 from ... import launch
-from ..client import DAPClient
+from ..client import Client
 
 CONNECT_TIMEOUT = 10.0
 CONNECT_RETRY_INTERVAL = 0.1
@@ -32,7 +32,7 @@ def session(port: int, target_path: str, *args: str):
         last_error = None
         while time.monotonic() < deadline:
             try:
-                client = DAPClient.connect("127.0.0.1", port)
+                client = Client.connect("127.0.0.1", port)
                 break
             except OSError as e:
                 last_error = e
@@ -50,7 +50,7 @@ def session(port: int, target_path: str, *args: str):
         os.close(proc.master_fd)
 
 
-def attach_and_configure(client: DAPClient, breakpoints: dict | None = None, exception_filters: list[str] | None = None) -> dict:
+def attach_and_configure(client: Client, breakpoints: dict | None = None, exception_filters: list[str] | None = None) -> dict:
     """Run the initialize/attach/setBreakpoints/configurationDone handshake.
 
     `breakpoints` is {source_path: [{"line": N}, ...]} per setBreakpoints.

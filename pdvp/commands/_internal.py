@@ -148,7 +148,7 @@ class _StdinPassthrough:
 _RESUME_RESULT_EVENTS = {"stopped", "exited", "terminated", "_disconnected"}
 
 
-def _wait_for_resume_result(client: _dap.DAPClient, prefix: str = "") -> StopResult:
+def _wait_for_resume_result(client: _dap.Client, prefix: str = "") -> StopResult:
     """Block until the resumed program stops, exits, or the connection drops.
 
     While blocked, forwards our stdin to the inferior's pty -- only if its

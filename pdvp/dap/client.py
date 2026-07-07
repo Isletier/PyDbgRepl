@@ -1,7 +1,6 @@
 """DAP client: request/response correlation and event dispatch over DAPTransport.
-
-Covers the v1 request/event subset documented in doc/dap_scope.md.
 """
+
 import json
 import queue
 import threading
@@ -34,7 +33,7 @@ class dap_event_name(StrEnum):
     INVALIDATED     = "invalidated",
     MEMORY          = "memory"
 
-class DAPClient:
+class Client:
     def __init__(self, transport: DAPTransport):
         self._transport = transport
 
@@ -106,8 +105,9 @@ class DAPClient:
             raise DAPError(f"timed out waiting for response to '{command}'")
 
         with self._pending_lock:
-            resp = self._pending.pop(request.seq, None)
+            resp: dap.Response = self._pending.pop(request.seq, None)
 
+        assert(resp != None)
         return resp
 
     def wait_for_event(self, event_name: dap_event_name, timeout: float | None = None) -> dap.Event:
