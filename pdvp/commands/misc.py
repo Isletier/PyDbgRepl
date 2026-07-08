@@ -8,11 +8,11 @@ __all__ = ["modules", "pydevd_info"]
 
 def modules() -> ModuleList | Error:
     """Modules loaded in the debuggee."""
-    if SESSION.dap is None:
+    if SESSION.client is None:
         return Error("not connected")
 
     try:
-        result = SESSION.dap.modules()
+        result = SESSION.client.modules()
     except _dap.DAPError as e:
         return Error(str(e))
     return ModuleList(result.get("modules", []))
@@ -20,11 +20,11 @@ def modules() -> ModuleList | Error:
 
 def pydevd_info() -> InfoSections | Error:
     """pydevd's process/Python/platform info (pydevdSystemInfo)."""
-    if SESSION.dap is None:
+    if SESSION.client is None:
         return Error("not connected")
 
     try:
-        result = SESSION.dap.pydevd_system_info()
+        result = SESSION.client.pydevd_system_info()
     except _dap.DAPError as e:
         return Error(str(e))
     return InfoSections(result)

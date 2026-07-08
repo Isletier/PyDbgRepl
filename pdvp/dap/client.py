@@ -8,13 +8,13 @@ from enum import StrEnum
 from typing import Callable
 
 from .transport import DAPTransport
-import pdvp.schema.pydevd_schema as dap
-import pdvp.schema.pydevd_base_schema as dap_base
+import pdvp.schema.pydevd_schema as schema
+import pdvp.schema.pydevd_base_schema as base_schema
 
 class DAPError(Exception):
     pass
 
-class dap_event_name(StrEnum):
+class event_name(StrEnum):
     INITIALIZED     = "initialized",
     STOPPED         = "stopped",
     CONTINUED       = "continued",
@@ -40,7 +40,7 @@ class Client:
         self._seq = 0
         self._seq_lock = threading.Lock()
 
-        self._pending: dict[int, tuple[threading.Event, dap.Response | None]] = {}
+        self._pending: dict[int, tuple[threading.Event, schema.Response | None]] = {}
         self._pending_lock = threading.Lock()
 
         self.events: queue.Queue[dict] = queue.Queue()
@@ -69,7 +69,7 @@ class Client:
         while True:
             try:
                 responce_str = self._transport.recv()
-                message : dap.ProtocolMessage = dap_base.from_json(responce_str)
+                message : schema.ProtocolMessage = base_schema.from_json(responce_str)
             except Exception as e:
                 self.close()
                 raise e
@@ -83,7 +83,7 @@ class Client:
             else:
                 raise DAPError()
 
-    def _handle_response(self, responce: dap.Response) -> None:
+    def _handle_response(self, responce: schema.Response) -> None:
         # a server side seq handling should be processed
         with self._pending_lock:
             event, _ = self._pending.get(responce.request_seq, None)
@@ -91,7 +91,7 @@ class Client:
             event.set()
 
 
-    def request(self, request: dap.Request, timeout: float | None = None) -> dap.Response:
+    def request(self, request: schema.Request, timeout: float | None = None) -> schema.Response:
         """Send a request and block for its response body. Raises DAPError on failure/timeout."""
         request.seq = self._next_seq()
 
@@ -105,12 +105,12 @@ class Client:
             raise DAPError(f"timed out waiting for response to '{command}'")
 
         with self._pending_lock:
-            resp: dap.Response = self._pending.pop(request.seq, None)
+            resp: schema.Response = self._pending.pop(request.seq, None)
 
         assert(resp != None)
         return resp
 
-    def wait_for_event(self, event_name: dap_event_name, timeout: float | None = None) -> dap.Event:
+    def wait_for_event(self, event_name: event_name, timeout: float | None = None) -> schema.Event:
         """Block until an event named `event_name` arrives. Other events are kept in order.
 
         Raises DAPError on timeout.
@@ -118,7 +118,7 @@ class Client:
 
         return self.wait_for_events({event_name}, timeout)
 
-    def wait_for_events(self, event_names: set[dap_event_name], timeout: float | None = None) -> dap.Event:
+    def wait_for_events(self, event_names: set[event_name], timeout: float | None = None) -> schema.Event:
         """Block until an event whose name is in `event_names` arrives.
 
         Returns the full message (with "event" and "body" keys). Other events
@@ -129,7 +129,7 @@ class Client:
         try:
             while True:
                 try:
-                    event: dap.Event = self.events.get(timeout=timeout)
+                    event: schema.Event = self.events.get(timeout=timeout)
                 except queue.Empty:
                     raise DAPError(f"timed out waiting for one of {sorted(event_names)!r}")
                 if event.event in event_names:
@@ -141,8 +141,8 @@ class Client:
 
     # ---- session lifecycle ----
 
-    def initialize(self, **kwargs) -> dap.InitializeResponse:
-        initRequest = dap.InitializeRequest(dap.InitializeRequestArguments(
+    def initialize(self, **kwargs) -> schema.InitializeResponse:
+        initRequest = schema.InitializeRequest(schema.InitializeRequestArguments(
             adapterID = "pdvp",
             ClientID = "pdvp",
             ClientName = "pdvp",
@@ -155,34 +155,34 @@ class Client:
 
         return self.request(initRequest)
 
-    def attach(self, **arguments) -> dap.AttachResponse:
-        attach_req = dap.AttachRequest(arguments=dap.AttachRequestArguments(arguments))
+    def attach(self, **arguments) -> schema.AttachResponse:
+        attach_req = schema.AttachRequest(arguments=schema.AttachRequestArguments(arguments))
         return self.request(attach_req)
 
-    def configuration_done(self) -> dap.ConfigurationDoneResponse:
-        conf_done_req = dap.ConfigurationDoneRequest(arguments=dap.ConfigurationDoneArguments())
+    def configuration_done(self) -> schema.ConfigurationDoneResponse:
+        conf_done_req = schema.ConfigurationDoneRequest(arguments=schema.ConfigurationDoneArguments())
         return self.request(conf_done_req)
 
-    def disconnect(self, terminate_debuggee: bool | None = None) -> dap.DisconnectResponse:
-        disconnect_req = dap.DisconnectRequest(arguments=dap.DisconnectArguments(terminateDebuggee=terminate_debuggee))
+    def disconnect(self, terminate_debuggee: bool | None = None) -> schema.DisconnectResponse:
+        disconnect_req = schema.DisconnectRequest(arguments=schema.DisconnectArguments(terminateDebuggee=terminate_debuggee))
         return self.request(disconnect_req)
 
-    def terminate(self, restart: bool | None = None) -> dap.TerminateResponse:
-        terminate_req = dap.TerminateRequest(arguments=dap.TerminateArguments(restart))
+    def terminate(self, restart: bool | None = None) -> schema.TerminateResponse:
+        terminate_req = schema.TerminateRequest(arguments=schema.TerminateArguments(restart))
         return self.request(terminate_req)
 
     # ---- execution control ----
 
-    def continue_(self, thread_id: int, single_thread: bool = False) -> dap.ContinueResponse:
-        cont_req = dap.ContinueRequest(arguments=dap.ContinueArguments(
+    def continue_(self, thread_id: int, single_thread: bool = False) -> schema.ContinueResponse:
+        cont_req = schema.ContinueRequest(arguments=schema.ContinueArguments(
             thread_id,
             single_thread
         ))
 
         return self.request(cont_req)
 
-    def next(self, thread_id: int, single_thread: bool = False, granularity: str | None = None) -> dap.ContinueResponse:
-        next_req = dap.NextRequest(arguments=dap.NextArguments(
+    def next(self, thread_id: int, single_thread: bool = False, granularity: str | None = None) -> schema.ContinueResponse:
+        next_req = schema.NextRequest(arguments=schema.NextArguments(
             thread_id,
             single_thread,
             granularity
@@ -190,8 +190,8 @@ class Client:
 
         return self.request(next_req)
 
-    def step_in(self, thread_id: int, single_thread: bool = False, target_id: int | None = None, granularity: str | None = None) -> dap.StepInResponse:
-        stepIn_req = dap.StepInRequest(arguments=dap.StepInArguments(
+    def step_in(self, thread_id: int, single_thread: bool = False, target_id: int | None = None, granularity: str | None = None) -> schema.StepInResponse:
+        stepIn_req = schema.StepInRequest(arguments=schema.StepInArguments(
             thread_id,
             single_thread,
             target_id,
@@ -200,27 +200,27 @@ class Client:
 
         return self.request(stepIn_req)
 
-    def step_out(self, thread_id: int, single_thread: bool = False, granularity: str | None = None) -> dap.StepOutResponse:
-        stepOut_req = dap.StepOutRequest(arguments=dap.StepOutArguments(
+    def step_out(self, thread_id: int, single_thread: bool = False, granularity: str | None = None) -> schema.StepOutResponse:
+        stepOut_req = schema.StepOutRequest(arguments=schema.StepOutArguments(
             thread_id,
             single_thread,
             granularity
         ))
         return self.request(stepOut_req)
 
-    def pause(self, thread_id: int) -> dap.PauseResponse:
-        pause_req = dap.PauseRequest(arguments=dap.PauseArguments(
+    def pause(self, thread_id: int) -> schema.PauseResponse:
+        pause_req = schema.PauseRequest(arguments=schema.PauseArguments(
             thread_id
         ))
         return self.request(pause_req)
 
     # ---- inspection ----
 
-    def threads(self) -> dap.ThreadsResponse:
-        return self.request(dap.ThreadsRequest())
+    def threads(self) -> schema.ThreadsResponse:
+        return self.request(schema.ThreadsRequest())
 
-    def stack_trace(self, thread_id: int, start_frame: int | None = None, levels: int | None = None) -> dap.StackTraceResponse:
-        stack_trace_req = dap.StackTraceRequest(arguments=dap.StackTraceArguments(
+    def stack_trace(self, thread_id: int, start_frame: int | None = None, levels: int | None = None) -> schema.StackTraceResponse:
+        stack_trace_req = schema.StackTraceRequest(arguments=schema.StackTraceArguments(
             thread_id,
             start_frame,
             levels,
@@ -229,15 +229,15 @@ class Client:
 
         return self.request(stack_trace_req)
 
-    def scopes(self, frame_id: int) -> dap.ScopesResponse:
-        scopes_req = dap.ScopesRequest(arguments=dap.ScopesArguments(
+    def scopes(self, frame_id: int) -> schema.ScopesResponse:
+        scopes_req = schema.ScopesRequest(arguments=schema.ScopesArguments(
             frame_id
         ))
 
         return self.request(scopes_req)
 
-    def variables(self, variables_reference: int, **kwargs) -> dap.VariablesResponse:
-        variables_req = dap.VariablesRequest(arguments=dap.VariablesArguments(
+    def variables(self, variables_reference: int, **kwargs) -> schema.VariablesResponse:
+        variables_req = schema.VariablesRequest(arguments=schema.VariablesArguments(
             variables_reference,
             filter=None,
             start=None,
@@ -247,8 +247,8 @@ class Client:
 
         return self.request(variables_req)
 
-    def set_variable(self, variables_reference: int, name: str, value: str) -> dap.SetVariableResponse:
-        set_variable_req = dap.SetVariableRequest(arguments=dap.SetVariableArguments(
+    def set_variable(self, variables_reference: int, name: str, value: str) -> schema.SetVariableResponse:
+        set_variable_req = schema.SetVariableRequest(arguments=schema.SetVariableArguments(
             variables_reference,
             name,
             value,
@@ -257,8 +257,8 @@ class Client:
 
         return self.request(set_variable_req)
 
-    def set_expression(self, expression: str, value: str, frame_id: int | None = None) -> dap.SetExpressionResponse:
-        set_expr_req = dap.SetExpressionRequest(arguments=dap.SetExpressionArguments(
+    def set_expression(self, expression: str, value: str, frame_id: int | None = None) -> schema.SetExpressionResponse:
+        set_expr_req = schema.SetExpressionRequest(arguments=schema.SetExpressionArguments(
             expression,
             value,
             frame_id,
@@ -267,8 +267,8 @@ class Client:
 
         return self.request(set_expr_req)
 
-    def evaluate(self, expression: str, frame_id: int | None = None, context: str | None = None) -> dap.EvaluateResponse:
-        evaluate_req = dap.EvaluateRequest(arguments=dap.EvaluateArguments(
+    def evaluate(self, expression: str, frame_id: int | None = None, context: str | None = None) -> schema.EvaluateResponse:
+        evaluate_req = schema.EvaluateRequest(arguments=schema.EvaluateArguments(
             expression,
             frame_id,
             context,
@@ -277,8 +277,8 @@ class Client:
 
         return self.request(evaluate_req)
 
-    def exception_info(self, thread_id: int) -> dap.ExceptionInfoResponse:
-        exception_info_req = dap.ExceptionInfoRequest(arguments=dap.ExceptionInfoArguments(
+    def exception_info(self, thread_id: int) -> schema.ExceptionInfoResponse:
+        exception_info_req = schema.ExceptionInfoRequest(arguments=schema.ExceptionInfoArguments(
             thread_id
         ))
 
@@ -286,8 +286,8 @@ class Client:
 
     # ---- breakpoints ----
 
-    def set_breakpoints(self, source: dap.Source, breakpoints: list[dap.Breakpoint]) -> dap.SetBreakpointsResponse:
-        set_breakpoints_req = dap.SetBreakpointsRequest(arguments=dap.SetBreakpointsArguments(
+    def set_breakpoints(self, source: schema.Source, breakpoints: list[schema.Breakpoint]) -> schema.SetBreakpointsResponse:
+        set_breakpoints_req = schema.SetBreakpointsRequest(arguments=schema.SetBreakpointsArguments(
             source,
             breakpoints,
             lines=None,
@@ -296,8 +296,8 @@ class Client:
 
         return self.request(set_breakpoints_req)
 
-    def set_function_breakpoints(self, fbreakpoints: list[dap.FunctionBreakpoint]) -> dap.SetFunctionBreakpointsResponse:
-        set_function_breakpoints_req = dap.SetFunctionBreakpointsRequest(arguments=dap.SetFunctionBreakpointsArguments(
+    def set_function_breakpoints(self, fbreakpoints: list[schema.FunctionBreakpoint]) -> schema.SetFunctionBreakpointsResponse:
+        set_function_breakpoints_req = schema.SetFunctionBreakpointsRequest(arguments=schema.SetFunctionBreakpointsArguments(
             fbreakpoints
         ))
 
@@ -305,11 +305,11 @@ class Client:
 
     def set_exception_breakpoints(self,
             filters: list[str],
-            filter_options: list[dap.ExceptionFilterOptions],
-            exception_options: list[dap.ExceptionOptions]
-        ) -> dap.SetExceptionBreakpointsResponse:
+            filter_options: list[schema.ExceptionFilterOptions],
+            exception_options: list[schema.ExceptionOptions]
+        ) -> schema.SetExceptionBreakpointsResponse:
 
-        set_exception_breakpoints_req = dap.SetExceptionBreakpointsRequest(arguments=dap.SetExceptionBreakpointsArguments(
+        set_exception_breakpoints_req = schema.SetExceptionBreakpointsRequest(arguments=schema.SetExceptionBreakpointsArguments(
             filters,
             filter_options,
             exception_options
@@ -319,15 +319,15 @@ class Client:
 
     # ---- execution control extras ----
 
-    def step_in_targets(self, frame_id: int) -> dap.StepInTargetsResponse:
-        step_in_targets_req = dap.StepInTargetsRequest(arguments=dap.StepInTargetsArguments(
+    def step_in_targets(self, frame_id: int) -> schema.StepInTargetsResponse:
+        step_in_targets_req = schema.StepInTargetsRequest(arguments=schema.StepInTargetsArguments(
             frame_id
         ))
 
         return self.request(step_in_targets_req)
 
-    def goto_targets(self, source: dap.Source, line: int, column: int | None = None) -> dap.GotoTargetsResponse:
-        goto_targets_req = dap.GotoTargetsRequest(arguments=dap.GotoTargetsArguments(
+    def goto_targets(self, source: schema.Source, line: int, column: int | None = None) -> schema.GotoTargetsResponse:
+        goto_targets_req = schema.GotoTargetsRequest(arguments=schema.GotoTargetsArguments(
             source,
             line,
             column
@@ -335,8 +335,8 @@ class Client:
 
         return self.request(goto_targets_req)
 
-    def goto(self, thread_id: int, target_id: int) -> dap.GotoResponse:
-        goto_req = dap.GotoRequest(arguments=dap.GotoArguments(
+    def goto(self, thread_id: int, target_id: int) -> schema.GotoResponse:
+        goto_req = schema.GotoRequest(arguments=schema.GotoArguments(
             thread_id,
             target_id
         ))
@@ -345,8 +345,8 @@ class Client:
 
     # ---- inspection extras ----
 
-    def completions(self, text: str, column: int, frame_id: int | None = None, line: int | None = None) -> dap.CompletionsResponse:
-        completeions_req = dap.CompletionsRequest(arguments=dap.CompletionsArguments(
+    def completions(self, text: str, column: int, frame_id: int | None = None, line: int | None = None) -> schema.CompletionsResponse:
+        completeions_req = schema.CompletionsRequest(arguments=schema.CompletionsArguments(
             text,
             column,
             frame_id,
@@ -355,16 +355,16 @@ class Client:
 
         return self.request(completeions_req)
 
-    def source(self, source_reference: int, source: dap.Source | None) -> dap.SourceResponse:
-        source_req = dap.SourceRequest(arguments=dap.SourceArguments(
+    def source(self, source_reference: int, source: schema.Source | None) -> schema.SourceResponse:
+        source_req = schema.SourceRequest(arguments=schema.SourceArguments(
             source_reference,
             source
         ))
 
         return self.request(source_req)
 
-    def modules(self, start_module: int | None = None, module_count: int | None = None) -> dap.ModulesResponse:
-        modules_req = dap.ModulesRequest(arguments=dap.ModulesArguments(
+    def modules(self, start_module: int | None = None, module_count: int | None = None) -> schema.ModulesResponse:
+        modules_req = schema.ModulesRequest(arguments=schema.ModulesArguments(
             start_module,
             module_count
         ))
@@ -373,19 +373,19 @@ class Client:
 
     # ---- pydevd-specific extensions ----
 
-    def pydevd_authorize(self, debug_server_access_token: str | None = None) -> dap.PydevdAuthorizeResponse:
-        pydevd_authorize_req = dap.PydevdAuthorizeRequest(arguments=dap.PydevdAuthorizeArguments(
+    def pydevd_authorize(self, debug_server_access_token: str | None = None) -> schema.PydevdAuthorizeResponse:
+        pydevd_authorize_req = schema.PydevdAuthorizeRequest(arguments=schema.PydevdAuthorizeArguments(
             debug_server_access_token
         ))
 
         return self.request(pydevd_authorize_req)
 
-    def pydevd_system_info(self) -> dap.PydevdSystemInfoResponse:
-        pydevd_system_info_req = dap.PydevdSystemInfoRequest(arguments=dap.PydevdSystemInfoArguments())
+    def pydevd_system_info(self) -> schema.PydevdSystemInfoResponse:
+        pydevd_system_info_req = schema.PydevdSystemInfoRequest(arguments=schema.PydevdSystemInfoArguments())
         return self.request(pydevd_system_info_req)
 
-    def set_debugger_property(self) -> dap.SetDebuggerPropertyResponse:
-        set_debugger_property_req = dap.SetDebuggerPropertyRequest(arguments=dap.SetDebuggerPropertyArguments(
+    def set_debugger_property(self) -> schema.SetDebuggerPropertyResponse:
+        set_debugger_property_req = schema.SetDebuggerPropertyRequest(arguments=schema.SetDebuggerPropertyArguments(
             ideOS=None,
             dontTraceStartPatterns=None,
             dontTraceEndPatterns=None,
@@ -396,8 +396,8 @@ class Client:
 
         return self.request(set_debugger_property)
 
-    def set_pydevd_source_map(self, source: dict, pydevd_source_maps: list[dap.PydevdSourceMap]) -> dap.SetPydevdSourceMapResponse:
-        set_pydevd_source_map_req = dap.SetPydevdSourceMapRequest(arguments=dap.SetPydevdSourceMapArguments(
+    def set_pydevd_source_map(self, source: dict, pydevd_source_maps: list[schema.PydevdSourceMap]) -> schema.SetPydevdSourceMapResponse:
+        set_pydevd_source_map_req = schema.SetPydevdSourceMapRequest(arguments=schema.SetPydevdSourceMapArguments(
             source,
             pydevdSourceMaps
         ))

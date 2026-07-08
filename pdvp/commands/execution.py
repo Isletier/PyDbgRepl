@@ -23,7 +23,7 @@ def cont() -> StopResult | Error:
     err = _ensure_thread_paused()
     if err is not None:
         return err
-    client = SESSION.dap
+    client = SESSION.client
     client.continue_(SESSION.current_thread_id)
     SESSION.running = True
     return _wait_for_resume_result(client, prefix="continuing")
@@ -34,7 +34,7 @@ def step() -> StopResult | Error:
     err = _ensure_thread_paused()
     if err is not None:
         return err
-    client = SESSION.dap
+    client = SESSION.client
     client.step_in(SESSION.current_thread_id)
     SESSION.running = True
     return _wait_for_resume_result(client, prefix="stepping")
@@ -45,7 +45,7 @@ def next() -> StopResult | Error:
     err = _ensure_thread_paused()
     if err is not None:
         return err
-    client = SESSION.dap
+    client = SESSION.client
     client.next(SESSION.current_thread_id)
     SESSION.running = True
     return _wait_for_resume_result(client, prefix="stepping over")
@@ -56,7 +56,7 @@ def finish() -> StopResult | Error:
     err = _ensure_thread_paused()
     if err is not None:
         return err
-    client = SESSION.dap
+    client = SESSION.client
     client.step_out(SESSION.current_thread_id)
     SESSION.running = True
     return _wait_for_resume_result(client, prefix="finishing")
@@ -64,13 +64,13 @@ def finish() -> StopResult | Error:
 
 def interrupt() -> Status | Error:
     """Pause a running program. Used internally by Ctrl+C; returns immediately."""
-    if SESSION.dap is None:
+    if SESSION.client is None:
         return Error("not connected (use connect())")
     if SESSION.current_thread_id is None:
         return Error("no current thread (use threads())")
     if not SESSION.running:
         return Error("program is not running")
-    SESSION.dap.pause(SESSION.current_thread_id)
+    SESSION.client.pause(SESSION.current_thread_id)
     return Status("interrupting")
 
 
@@ -119,15 +119,15 @@ def jump(line: int) -> StopResult | Error:
         return Error("no current file")
 
     try:
-        targets = SESSION.dap.goto_targets({"path": path}, line)["targets"]
+        targets = SESSION.client.goto_targets({"path": path}, line)["targets"]
     except _dap.DAPError as e:
         return Error(str(e))
     if not targets:
         return Error(f"no jump target at {path}:{line}")
 
     try:
-        SESSION.dap.goto(SESSION.current_thread_id, targets[0]["id"])
-        body = SESSION.dap.wait_for_event("stopped", timeout=5)
+        SESSION.client.goto(SESSION.current_thread_id, targets[0]["id"])
+        body = SESSION.client.wait_for_event("stopped", timeout=5)
     except _dap.DAPError as e:
         return Error(str(e))
 

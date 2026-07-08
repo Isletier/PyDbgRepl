@@ -5,6 +5,7 @@ from . import _internal
 from ._display import Breakpoints, Error, Status
 from ._internal import _resolve_path_line
 
+
 __all__ = [
     "breakpoint", "clear", "catch", "tbreak",
     "enable", "disable", "ignore", "breakpoints", "funcbreak",
@@ -12,14 +13,14 @@ __all__ = [
 
 
 def _send_breakpoints(path: str) -> None:
-    if SESSION.dap is None:
+    if SESSION.client is None:
         return
     sent = [
         {k: v for k, v in b.items() if k != "enabled"}
         for b in SESSION.breakpoints.get(path, [])
         if b.get("enabled", True)
     ]
-    SESSION.dap.set_breakpoints({"path": path}, sent)
+    SESSION.client.set_breakpoints({"path": path}, sent)
 
 
 def breakpoint(path_or_line: str | int, line: int | None = None,
@@ -67,8 +68,8 @@ def clear(path_or_line: str | int, line: int | None = None) -> Status | Error:
 def catch(*filters: str) -> Status:
     """Set exception breakpoint filters, e.g. catch("raised", "uncaught")."""
     SESSION.exception_filters = list(filters)
-    if SESSION.dap is not None:
-        SESSION.dap.set_exception_breakpoints(SESSION.exception_filters, [], [])
+    if SESSION.client is not None:
+        SESSION.client.set_exception_breakpoints(SESSION.exception_filters, [], [])
     return Status(f"exception filters = {SESSION.exception_filters}")
 
 
@@ -148,8 +149,8 @@ def funcbreak(name: str, condition: str | None = None) -> Status:
     bps = SESSION.function_breakpoints
     bps[:] = [b for b in bps if b["name"] != name] + [fb]
 
-    if SESSION.dap is not None:
-        SESSION.dap.set_function_breakpoints(bps)
+    if SESSION.client is not None:
+        SESSION.client.set_function_breakpoints(bps)
     return Status(f"function breakpoint set at {name}")
 
 

@@ -173,10 +173,10 @@ class DebuggerCompleter(Completer):
 
     def _thread_id_completions(self, arg_text: str):
         fragment = arg_text.strip()
-        if SESSION.dap is None:
+        if SESSION.client is None:
             return
         try:
-            threads = SESSION.dap.threads()["threads"]
+            threads = SESSION.client.threads()["threads"]
         except _dap.DAPError:
             return
         for t in threads:
@@ -186,10 +186,10 @@ class DebuggerCompleter(Completer):
 
     def _frame_index_completions(self, arg_text: str):
         fragment = arg_text.strip()
-        if SESSION.dap is None or SESSION.current_thread_id is None:
+        if SESSION.client is None or SESSION.current_thread_id is None:
             return
         try:
-            frames = SESSION.dap.stack_trace(SESSION.current_thread_id)["stackFrames"]
+            frames = SESSION.client.stack_trace(SESSION.current_thread_id)["stackFrames"]
         except _dap.DAPError:
             return
         for i, f in enumerate(frames):

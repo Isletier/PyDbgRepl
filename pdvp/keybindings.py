@@ -15,7 +15,7 @@ def _f5_action() -> object:
     from .session import SESSION
     from . import commands
 
-    if SESSION.dap is None:
+    if SESSION.client is None:
         return commands.run()
     return commands.cont()
 

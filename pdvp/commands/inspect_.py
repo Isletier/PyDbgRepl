@@ -18,7 +18,7 @@ def p(expression: str) -> Status | Error:
         return err
 
     try:
-        result = SESSION.dap.evaluate(expression, frame_id=SESSION.current_frame_id, context="repl")
+        result = SESSION.client.evaluate(expression, frame_id=SESSION.current_frame_id, context="repl")
     except _dap.DAPError as e:
         return Error(str(e))
     return Status(result["result"])
@@ -31,10 +31,10 @@ def _scope(scope_name: str) -> Scope | Error:
     if SESSION.current_frame_id is None:
         return Error("no current frame (use bt())")
 
-    for scope in SESSION.dap.scopes(SESSION.current_frame_id)["scopes"]:
+    for scope in SESSION.client.scopes(SESSION.current_frame_id)["scopes"]:
         if scope["name"] != scope_name:
             continue
-        return Scope(SESSION.dap.variables(scope["variablesReference"])["variables"])
+        return Scope(SESSION.client.variables(scope["variablesReference"])["variables"])
     return Scope()
 
 
@@ -55,7 +55,7 @@ def setvar(name: str, value: str) -> Status | Error:
         return err
 
     try:
-        SESSION.dap.evaluate(f"{name} = {value}", frame_id=SESSION.current_frame_id, context="repl")
+        SESSION.client.evaluate(f"{name} = {value}", frame_id=SESSION.current_frame_id, context="repl")
     except _dap.DAPError as e:
         return Error(str(e))
     return Status(f"{name} = {value}")
@@ -68,7 +68,7 @@ def whatis(expression: str) -> Status | Error:
         return err
 
     try:
-        result = SESSION.dap.evaluate(expression, frame_id=SESSION.current_frame_id, context="hover")
+        result = SESSION.client.evaluate(expression, frame_id=SESSION.current_frame_id, context="hover")
     except _dap.DAPError as e:
         return Error(str(e))
     return Status(result.get("type", "?"))
@@ -79,7 +79,7 @@ def display(expression: str) -> Status:
     display_id = max((d["id"] for d in SESSION.displays), default=0) + 1
     SESSION.displays.append({"id": display_id, "expr": expression})
     lines = [f"{display_id}: {expression}"]
-    if SESSION.dap is not None and not SESSION.running:
+    if SESSION.client is not None and not SESSION.running:
         lines.append(_show_display(SESSION.displays[-1]))
     return Status("\n".join(lines))
 
@@ -95,7 +95,7 @@ def undisplay(display_id: int) -> Status | Error:
 
 def _show_display(d: dict) -> str:
     try:
-        result = SESSION.dap.evaluate(d["expr"], frame_id=SESSION.current_frame_id, context="repl")
+        result = SESSION.client.evaluate(d["expr"], frame_id=SESSION.current_frame_id, context="repl")
     except _dap.DAPError as e:
         return f"{d['id']}: {d['expr']} = <error: {e}>"
     return f"{d['id']}: {d['expr']} = {result['result']}"
@@ -108,7 +108,7 @@ def exception_info() -> ExceptionInfo | Error:
         return err
 
     try:
-        info = SESSION.dap.exception_info(SESSION.current_thread_id)
+        info = SESSION.client.exception_info(SESSION.current_thread_id)
     except _dap.DAPError as e:
         return Error(str(e))
 
@@ -126,7 +126,7 @@ def completions(text: str, column: int) -> CompletionList | Error:
         return err
 
     try:
-        result = SESSION.dap.completions(text, column, frame_id=SESSION.current_frame_id)
+        result = SESSION.client.completions(text, column, frame_id=SESSION.current_frame_id)
     except _dap.DAPError as e:
         return Error(str(e))
     return CompletionList(result.get("targets", []))

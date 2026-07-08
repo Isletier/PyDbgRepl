@@ -59,7 +59,7 @@ def _async_print(message: str) -> None:
 # ---- session lifetime ----
 
 def _clear_dap_state() -> None:
-    SESSION.dap = None
+    SESSION.client = None
     SESSION.running = False
     SESSION.current_thread_id = None
     SESSION.current_frame_id = None
@@ -67,8 +67,8 @@ def _clear_dap_state() -> None:
 
 def _end_session() -> None:
     """Tear down the pydevd connection and any spawned process together as one unit."""
-    if SESSION.dap is not None:
-        client = SESSION.dap
+    if SESSION.client is not None:
+        client = SESSION.client
         client.on_disconnect = None
         client.close()
 
@@ -196,7 +196,7 @@ def _report_stopped(body: dict, prefix: str = "") -> StopResult:
     top = None
     if SESSION.current_thread_id is not None:
         try:
-            trace = SESSION.dap.stack_trace(SESSION.current_thread_id, levels=1)
+            trace = SESSION.client.stack_trace(SESSION.current_thread_id, levels=1)
             frames = trace["stackFrames"]
             if frames:
                 top = frames[0]
@@ -210,12 +210,12 @@ def _report_stopped(body: dict, prefix: str = "") -> StopResult:
 
 
 def _on_dap_disconnect() -> None:
-    if SESSION.dap is None:
+    if SESSION.client is None:
         return
     if SESSION.running:
         # Main thread is blocked in _wait_for_resume_result(); wake it up so
         # it can report the disconnect and tear down the session itself.
-        SESSION.dap.events.put({"event": "_disconnected", "body": {}})
+        SESSION.client.events.put({"event": "_disconnected", "body": {}})
         return
     _end_session()
     _async_print("*** connection to pydevd lost")
@@ -224,7 +224,7 @@ def _on_dap_disconnect() -> None:
 # ---- guards ----
 
 def _ensure_dap_paused() -> Error | None:
-    if SESSION.dap is None:
+    if SESSION.client is None:
         return Error("not connected (use connect())")
     if SESSION.running:
         return Error("program is running")
@@ -244,9 +244,9 @@ def _ensure_thread_paused() -> Error | None:
 
 def _current_location() -> tuple[str | None, int | None]:
     """The current frame's (source path, line), or the run() script with no line."""
-    if SESSION.dap is not None and SESSION.current_frame_id is not None:
+    if SESSION.client is not None and SESSION.current_frame_id is not None:
         try:
-            trace = SESSION.dap.stack_trace(SESSION.current_thread_id)
+            trace = SESSION.client.stack_trace(SESSION.current_thread_id)
             for f in trace["stackFrames"]:
                 if f["id"] == SESSION.current_frame_id:
                     path = (f.get("source") or {}).get("path")

@@ -48,7 +48,7 @@ def _run(
     stdout: str | None = None,
     stderr: str | None = None,
 ) -> StopResult | Error:
-    if SESSION.dap is not None or SESSION.process is not None:
+    if SESSION.client is not None or SESSION.process is not None:
         prefix_lines.append("killing previous instance")
         _stop_session()
 
@@ -89,10 +89,10 @@ def _run(
 
 def _stop_session() -> None:
     """Tear down the current session: end our process, or ask a remote pydevd to terminate the debuggee."""
-    if SESSION.process is None and SESSION.dap is not None:
+    if SESSION.process is None and SESSION.client is not None:
         # Remote session: ask pydevd to terminate the debuggee on its end.
         try:
-            SESSION.dap.disconnect(terminate_debuggee=True)
+            SESSION.client.disconnect(terminate_debuggee=True)
         except _dap.DAPError:
             pass
 
@@ -101,7 +101,7 @@ def _stop_session() -> None:
 
 def stop() -> Status | Error:
     """End the session: the pydevd connection and any spawned process share one lifetime."""
-    if SESSION.dap is None and SESSION.process is None:
+    if SESSION.client is None and SESSION.process is None:
         return Error("no active session")
 
     _stop_session()
@@ -121,7 +121,7 @@ def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | Non
     if prefix_lines is None:
         prefix_lines = []
 
-    if SESSION.dap is not None:
+    if SESSION.client is not None:
         return Error("already connected")
 
     host = SESSION.options.dap_host
@@ -149,7 +149,7 @@ def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | Non
     client.set_exception_breakpoints(SESSION.exception_filters, [], [])
 
     client.on_disconnect = _on_dap_disconnect
-    SESSION.dap = client
+    SESSION.client = client
     SESSION.running = True
 
     client.configuration_done()
@@ -162,10 +162,10 @@ def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | Non
 
 def disconnect() -> Status | Error:
     """Detach from the pydevd DAP server, leaving the debuggee running. Local or remote."""
-    if SESSION.dap is None:
+    if SESSION.client is None:
         return Error("not connected")
 
-    client = SESSION.dap
+    client = SESSION.client
     client.on_disconnect = None
     try:
         client.disconnect(terminate_debuggee=False)
@@ -178,10 +178,10 @@ def disconnect() -> Status | Error:
 
 def terminate() -> Status | Error:
     """Ask pydevd to terminate the debuggee via the DAP terminate request. Local or remote."""
-    if SESSION.dap is None:
+    if SESSION.client is None:
         return Error("not connected")
     try:
-        SESSION.dap.terminate()
+        SESSION.client.terminate()
     except _dap.DAPError as e:
         return Error(str(e))
     return Status("terminate requested")
@@ -189,6 +189,6 @@ def terminate() -> Status | Error:
 
 def restart() -> StopResult | Error:
     """Restart the debuggee: stop() the current session (if any), then run() again."""
-    if SESSION.dap is not None or SESSION.process is not None:
+    if SESSION.client is not None or SESSION.process is not None:
         stop()
     return run()

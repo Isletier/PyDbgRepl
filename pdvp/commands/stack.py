@@ -8,10 +8,10 @@ __all__ = ["threads", "thread", "bt", "frame", "up", "down"]
 
 def threads() -> ThreadList | Error:
     """List threads. Picks a current thread if none is selected yet."""
-    if SESSION.dap is None:
+    if SESSION.client is None:
         return Error("not connected")
 
-    thread_list = SESSION.dap.threads()["threads"]
+    thread_list = SESSION.client.threads()["threads"]
 
     if SESSION.current_thread_id is None and thread_list:
         SESSION.current_thread_id = thread_list[0]["id"]
@@ -21,7 +21,7 @@ def threads() -> ThreadList | Error:
 
 def thread(thread_id: int) -> Status | Error:
     """Switch the current thread."""
-    if SESSION.dap is None:
+    if SESSION.client is None:
         return Error("not connected")
     SESSION.current_thread_id = thread_id
     SESSION.current_frame_id = None
@@ -34,7 +34,7 @@ def bt(levels: int | None = None) -> FrameList | Error:
     if err is not None:
         return err
 
-    trace = SESSION.dap.stack_trace(SESSION.current_thread_id, levels=levels)
+    trace = SESSION.client.stack_trace(SESSION.current_thread_id, levels=levels)
     frames = trace["stackFrames"]
 
     if SESSION.current_frame_id is None and frames:
@@ -49,7 +49,7 @@ def frame(index: int) -> FrameRef | Error:
     if err is not None:
         return err
 
-    frames = SESSION.dap.stack_trace(SESSION.current_thread_id)["stackFrames"]
+    frames = SESSION.client.stack_trace(SESSION.current_thread_id)["stackFrames"]
     if not (0 <= index < len(frames)):
         return Error(f"no frame {index}")
 
@@ -63,7 +63,7 @@ def _move_frame(delta: int) -> FrameRef | Error:
     if err is not None:
         return err
 
-    frames = SESSION.dap.stack_trace(SESSION.current_thread_id)["stackFrames"]
+    frames = SESSION.client.stack_trace(SESSION.current_thread_id)["stackFrames"]
     if not frames:
         return Error("no frames")
 
