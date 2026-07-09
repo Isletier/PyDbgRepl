@@ -189,15 +189,15 @@ def _wait_for_resume_result(client: _dap.Client, prefix: str = "") -> StopResult
 
 
 def _report_stopped(body: dict, prefix: str = "") -> StopResult:
-    SESSION.current_thread_id = body.get("threadId")
+    SESSION.current_thread_id = body.threadId
     SESSION.current_frame_id = None
-    reason = body.get("reason")
+    reason = body.reason
 
     top = None
     if SESSION.current_thread_id is not None:
         try:
             trace = SESSION.client.stack_trace(SESSION.current_thread_id, levels=1)
-            frames = trace["stackFrames"]
+            frames = trace.body.stackFrames
             if frames:
                 top = frames[0]
                 SESSION.current_frame_id = top["id"]
