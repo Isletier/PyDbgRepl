@@ -1,11 +1,13 @@
 """Debugging session state: pydevd launch config plus our own REPL options."""
 import dataclasses
 import threading
+import pathlib
 
 from . import launch
 from . import options as _options
 
 from . import dap
+from . import model
 
 
 @dataclasses.dataclass
@@ -27,15 +29,6 @@ class ReplOptions:
     interactive: bool = True
 
 @dataclasses.dataclass
-class Breakpoints:
-    "Internal Registry for breakpoints"
-    breakpoints: dict[str, list[dict]] = dataclasses.field(default_factory=dict)
-    function_breakpoints: list[dict] = dataclasses.field(default_factory=list)
-    temporary_breakpoints: set[tuple[str, int]] = dataclasses.field(default_factory=set)
-    exception_filters: list[str] = dataclasses.field(default_factory=list)
-
-
-@dataclasses.dataclass
 class SessionState:
     run_ctx: launch.RunContext = dataclasses.field(default_factory=launch.RunContext)
     options: ReplOptions = dataclasses.field(default_factory=ReplOptions)
@@ -45,10 +38,10 @@ class SessionState:
     running: bool = False
     current_thread_id: int | None = None
     current_frame_id: int | None = None
-    breakpoints: dict[str, list[dict]] = dataclasses.field(default_factory=dict)
-    function_breakpoints: list[dict] = dataclasses.field(default_factory=list)
-    temporary_breakpoints: set[tuple[str, int]] = dataclasses.field(default_factory=set)
-    exception_filters: list[str] = dataclasses.field(default_factory=list)
+
+    sourceMap:      model.SourceMap = dataclasses.Field(default_factory=dict)
+    Breakpoints:    dict[nubmer, model.Breakpoint] = dataclasses.Field(default_factory=dict)
+
     # `initialize` response, e.g. for `exceptionBreakpointFilters` (used by
     # catch()'s tab-completion).
     capabilities: dict = dataclasses.field(default_factory=dict)

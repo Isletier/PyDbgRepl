@@ -286,7 +286,7 @@ class Client:
 
     # ---- breakpoints ----
 
-    def set_breakpoints(self, source: schema.Source, breakpoints: list[schema.Breakpoint]) -> schema.SetBreakpointsResponse:
+    def set_breakpoints(self, source: schema.Source, breakpoints: list[schema.SourceBreakpoint]) -> schema.SetBreakpointsResponse:
         set_breakpoints_req = schema.SetBreakpointsRequest(arguments=schema.SetBreakpointsArguments(
             source,
             breakpoints,
