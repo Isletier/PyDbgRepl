@@ -39,8 +39,8 @@ class SessionState:
     current_thread_id: int | None = None
     current_frame_id: int | None = None
 
-    sourceMap:      model.SourceMap = dataclasses.Field(default_factory=dict)
-    Breakpoints:    dict[nubmer, model.Breakpoint] = dataclasses.Field(default_factory=dict)
+    sourceMap:      model.SourceMap | None = None
+    Breakpoints:    dict[int, model.Breakpoint] | None = None
 
     # `initialize` response, e.g. for `exceptionBreakpointFilters` (used by
     # catch()'s tab-completion).
