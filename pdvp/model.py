@@ -1,7 +1,7 @@
 """Pdvp external types model."""
 
-type Source = str
-type SourceMap = dict[Source, int]
+from pdvp.source import Source
+from pdvp.source import SourceMap
 
 class Breakpoint:
     def __init__(self, enabled: bool = True, verified: bool = False):
