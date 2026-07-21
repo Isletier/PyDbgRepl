@@ -2,12 +2,15 @@
 import dataclasses
 import threading
 import pathlib
+import tempfile
+import os
 
 from . import launch
 from . import options as _options
 
 from . import dap
 from . import model
+from . import source
 
 
 @dataclasses.dataclass
@@ -28,10 +31,14 @@ class ReplOptions:
     # unattended automation scenarios. See doc/scenario_mode.md.
     interactive: bool = True
 
+    source_catalog: str = os.path.realpath(tempfile.gettempdir())
+
+
 @dataclasses.dataclass
 class SessionState:
     run_ctx: launch.RunContext = dataclasses.field(default_factory=launch.RunContext)
     options: ReplOptions = dataclasses.field(default_factory=ReplOptions)
+
     process: launch.LaunchedProcess | None = None
     reader_thread: threading.Thread | None = None
     client: dap.Client | None = None
@@ -39,8 +46,8 @@ class SessionState:
     current_thread_id: int | None = None
     current_frame_id: int | None = None
 
-    sourceMap:      model.SourceMap | None = None
-    Breakpoints:    dict[int, model.Breakpoint] | None = None
+    sourceMap:      source.SourceMap = dataclasses.field(default_factory=source.SourceMap)
+    Breakpoints:    dict[int, model.Breakpoint] = dataclasses.field(default_factory=dict)
 
     # `initialize` response, e.g. for `exceptionBreakpointFilters` (used by
     # catch()'s tab-completion).

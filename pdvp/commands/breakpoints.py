@@ -33,7 +33,7 @@ def sbreak(*args, condition: str | None = None, hit_condition: str | None = None
         case [int(l), *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
             line = l
             pass
-        case [str(p), int(line), *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
+        case [str(p), int(l), *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
             path = p
             line = l
         case _:
@@ -69,40 +69,35 @@ def sbreak(*args, condition: str | None = None, hit_condition: str | None = None
         ))
 
 
-    serizalized_source: schema.Source | None = None
-    if (ref := SESSION.sourceMap.get(path)) is not None:
-        serizalized_source = schema.Source(
-            sourceReference = ref
-        )
-    else:
-        serialized_source = schema.Source(
-            path = path
-        )
+    serialized_source: schema.Source = SESSION.sourceMap.get_source(path)
 
     responce = SESSION.client.set_breakpoints(serialized_source, serialized_br)
     if not responce.success:
         raise model.PDVPError()
 
+    breakpoints: list[schema.Breakpoint] = responce.body.breakpoints
+    source_path = SESSION.sourceMap.register_source(breakpoints[0].source)
     SESSION.Breakpoints[source_br.ID] = source_br
+
     for index, b in enumerate(responce.body.breakpoints):
         source_breakpoint: schema.Breakpoint = b;
         destination_breakpoint: model.SourceBreakpoint = session.breakpoints[source_br_list[index].ID]
 
         destination_breakpoint.verified = source_breakpoint.verified
         destination_breakpoint.line = source_breakpoint.line
-        destination_breakpoint.path = source_breakpoint.source.path
+        destination_breakpoint.path = source_path
 
-
+    return source_br
 
 
 def breakpoint(*args) -> model.Breakpoint | None:
 
     match args:
-        case [int(line)]:
+        case [int() as line]:
             return sbreak(line)
-        case [model.Source(path), int(line)]:
+        case [str() as path, int() as line]:
             return sbreak(path, line);
-        case [model.Source(path), int(line), *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
+        case [str() as path, int() as line, *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
             cond, hit, log = rest + [None] * (3 - len(rest))
             return sbreak(line, path, cond, hit, log)
 
@@ -209,7 +204,7 @@ from ._internal import _resolve_path_line
 #    bps = SESSION.breakpoints.setdefault(path, [])
 #    bps[:] = [b for b in bps if b["line"] != line] + [bp]
 #
-#    _send_breakpoints(path)
+#    _esend_breakpoints(path)
 #    return Status(f"breakpoint set at {path}:{line}")
 
 
