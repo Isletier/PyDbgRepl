@@ -2,6 +2,8 @@
 import threading
 import time
 
+from pdvp.commands.breakpoints import commit_all
+
 from .. import dap as _dap
 from .. import launch as _launch
 from ..session import SESSION
@@ -141,16 +143,15 @@ def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | Non
     client.attach()
     client.wait_for_event("initialized", timeout=5)
 
-    for path, bps in SESSION.breakpoints.items():
-        sent = [{k: v for k, v in b.items() if k != "enabled"} for b in bps if b.get("enabled", True)]
-        client.set_breakpoints({"path": path}, sent)
-    if SESSION.function_breakpoints:
-        client.set_function_breakpoints(SESSION.function_breakpoints)
-    client.set_exception_breakpoints(SESSION.exception_filters, [], [])
-
     client.on_disconnect = _on_dap_disconnect
     SESSION.client = client
     SESSION.running = True
+
+    commit_all()
+
+#    if SESSION.function_breakpoints:
+#        client.set_function_breakpoints(SESSION.function_breakpoints)
+#    client.set_exception_breakpoints(SESSION.exception_filters, [], [])
 
     client.configuration_done()
     prefix_lines.append(f"connected to pydevd on {host}:{port}")

@@ -13,6 +13,10 @@ pdvp.process_args_envs(sys.argv[1:])
 # keybindings.unbind("f12")
 # keybindings.bind("f11", "locals()")
 
+
+pdvp.breakpoint("prototype/pydev_repl/examples/counter.py", 3)
+pdvp.run("prototype/pydev_repl/examples/counter.py")
+
 pdvp.start_eval()
 
 # optional "scenario" lines go here, e.g.:

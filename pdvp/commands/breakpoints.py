@@ -14,43 +14,32 @@ __all__ = [
 
 
 def _send_breakpoints(path: str) -> None:
+    commit_source_breakpoints(path)
+
+def commit_all() -> None:
+    sources: set[model.SourcePath] = set()
+
+    for key, breakp in SESSION.Breakpoints.items():
+        if not isinstance(breakp, model.SourceBreakpoint) or not breakp.enabled:
+            continue
+
+        sources.add(breakp.path)
+
+
+    print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    print(sources)
+    for source in sources:
+        commit_source_breakpoints(source)
+
+    return
+
+
+def commit_source_breakpoints(path: model.SourcePath):
     if SESSION.client is None:
         return
-    sent = [
-        {k: v for k, v in b.items() if k != "enabled"}
-        for b in SESSION.breakpoints.get(path, [])
-        if b.get("enabled", True)
-    ]
-    SESSION.client.set_breakpoints({"name": "govno", "path": path}, sent)
-
-
-
-def sbreak(*args, condition: str | None = None, hit_condition: str | None = None, log_message: str | None = None) -> model.SourceBreakpoint:
-    path = "CURRENT_PATH_CURRENTLY_NOT_IMPLEMENTED"
-    line = None
-
-    match args:
-        case [int(l), *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
-            line = l
-            pass
-        case [str(p), int(l), *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
-            path = p
-            line = l
-        case _:
-            raise TypeError("Invalid argument types for sbreak call")
-
-
-    source_br: model.SourceBreakpoint = model.SourceBreakpoint(
-            path,
-            line,
-            condition,
-            hit_condition,
-            log_message
-    )
 
     source_br_list: list[model.SourceBreakpoint] = list()
-    source_br_list.append(source_br)
-    for i, breakp in SESSION.Breakpoints:
+    for i, breakp in SESSION.Breakpoints.items():
         if not isinstance(breakp, model.SourceBreakpoint) or not breakp.enabled:
             continue
 
@@ -86,6 +75,40 @@ def sbreak(*args, condition: str | None = None, hit_condition: str | None = None
         destination_breakpoint.verified = source_breakpoint.verified
         destination_breakpoint.line = source_breakpoint.line
         destination_breakpoint.path = source_path
+
+    return
+
+
+def sbreak(*args, condition: str | None = None, hit_condition: str | None = None, log_message: str | None = None) -> model.SourceBreakpoint:
+    path = "CURRENT_PATH_CURRENTLY_NOT_IMPLEMENTED"
+    line = None
+
+    match args:
+        case [int(l), *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
+            line = l
+            pass
+        case [str(p), int(l), *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
+            path = p
+            line = l
+        case _:
+            raise TypeError("Invalid argument types for sbreak call")
+
+
+    #add path/file validation here, i guess?
+
+    source_br: model.SourceBreakpoint = model.SourceBreakpoint(
+            path,
+            line,
+            condition,
+            hit_condition,
+            log_message
+    )
+
+    SESSION.Breakpoints[source_br.ID] = source_br
+
+    #pass possible exception, keep internal model as source of truth, 
+    #until state is resynced some way or another
+    commit_source_breakpoints(path)
 
     return source_br
 
