@@ -16,6 +16,7 @@ class Breakpoint:
     verified:   bool        #consider this force disabled breakpoint
 
 class SourceBreakpoint(Breakpoint):
+
     def __init__(self, path: SourcePath, line: int, condition: str | None, hitCondition: str | None, logMessage: str | None, enabled: bool = True, verified: bool = False):
         super().__init__(enabled, verified)
         self.path = path
@@ -31,6 +32,13 @@ class SourceBreakpoint(Breakpoint):
     logMessage:     str | None
 
 class FunctionBreakpoint(Breakpoint):
+
+    def __init__(self, name: str, condition: str | None, hitCondition: str | None, enabled: bool = True, verified: bool = False):
+        super().__init__(enabled, verified)
+        self.name = name
+        self.condition = condition
+        self.hitCondition = hitCondition
+
     name:           str
     condition:      str | None
     hitCondition:   str | None

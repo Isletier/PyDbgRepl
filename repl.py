@@ -15,6 +15,7 @@ pdvp.process_args_envs(sys.argv[1:])
 
 
 pdvp.breakpoint("prototype/pydev_repl/examples/counter.py", 3)
+pdvp.fbreak("count")
 pdvp.run("prototype/pydev_repl/examples/counter.py")
 
 pdvp.start_eval()

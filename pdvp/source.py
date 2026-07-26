@@ -44,7 +44,8 @@ class SourceMap:
 
     def register_source(self, source: dap.Source) -> SourcePath:
         if source.sourceReference is None and source.path is None:
-            raise "help"
+            print("upidipup")
+            return
 
         if source.sourceReference is None:
             if os.path.exists(source.path):

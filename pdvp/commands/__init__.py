@@ -22,11 +22,10 @@ from .stack import __all__ as _stack_all
 
 #from .breakpoints import breakpoint
 #from .breakpoints import clear
-#from .breakpoints import catch
-#from .breakpoints import tbreak
-#from .breakpoints import enbale
+#from .breakpoints import sbreak
+#from .breakpoints import fbreak
+#from .breakpoints import enable
 #from .breakpoints import disable
-#from .breakpoints import ignore
 
 
 __all__ = [
