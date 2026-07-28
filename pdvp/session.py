@@ -40,8 +40,9 @@ class SessionState:
     options: ReplOptions = dataclasses.field(default_factory=ReplOptions)
 
     process: launch.LaunchedProcess | None = None
-    reader_thread: threading.Thread | None = None
     client: dap.Client | None = None
+
+    reader_thread: threading.Thread | None = None
     running: bool = False
     current_thread_id: int | None = None
     current_frame_id: int | None = None

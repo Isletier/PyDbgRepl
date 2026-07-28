@@ -28,7 +28,7 @@ import sys
 
 from . import commands as _commands
 from . import dap as _dap
-from . import launch as _launch
+from pdvp import launch
 from .commands import *  # noqa: F401,F403
 from .commands import __all__ as _commands_all
 from .session import SESSION  # noqa: F401
@@ -54,9 +54,9 @@ def process_args_envs(argv: list[str] | None = None, env: dict[str, str] | None 
         SESSION.options.interactive = False
 
     try:
-        _launch.process_args(SESSION.run_ctx, argv)
-        _launch.process_envs(SESSION.run_ctx, env)
-    except _launch.LaunchError as e:
+        launch.process_args(SESSION.run_ctx, argv)
+        launch.process_envs(SESSION.run_ctx, env)
+    except launch.LaunchError as e:
         print(f"error: {e}")
         raise SystemExit(1)
 
@@ -169,7 +169,8 @@ def start_eval() -> None:
     if SESSION.run_ctx.args_opt.file is not None:
         # Mirror the REPL's own repr-echo of run()'s result, since this call
         # happens before the prompt (and its repl-echo machinery) exists.
-        print(repr(_commands.run()))
+        #print(repr(_commands.run()))
+        pass
 
     import __main__
     for name in _commands_all:

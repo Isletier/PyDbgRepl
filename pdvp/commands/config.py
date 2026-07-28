@@ -1,5 +1,5 @@
 """Generic option get/set, e.g. set("port", 5678) or set("vm_type", "jython")."""
-from .. import launch as _launch
+from .. import launch as launch
 from .. import options as _options
 from ..session import SESSION
 from ._display import Error, Status
@@ -18,7 +18,7 @@ def set(name: str, value) -> Status | Error:
         result = _options.set_option(name, value)
     except KeyError:
         return Error(f"unknown option '{name}'")
-    except (_launch.LaunchError, ValueError) as e:
+    except (launch.LaunchError, ValueError) as e:
         return Error(str(e))
     return Status(f"{name} = {result!r}")
 

@@ -5,7 +5,7 @@ import time
 from pdvp.commands.breakpoints import commit_all
 
 from .. import dap as _dap
-from .. import launch as _launch
+from pdvp import launch
 from ..session import SESSION
 from ._display import Error, Status, StopResult
 from ._internal import (
@@ -39,11 +39,10 @@ def run(
 
     If a session is already running, it's killed first (gdb-style restart).
     """
-    return _run([], script, *args, stdin=stdin, stdout=stdout, stderr=stderr)
+    return _run(script, *args, stdin=stdin, stdout=stdout, stderr=stderr)
 
 
 def _run(
-    prefix_lines: list[str],
     script: str | None,
     *args: str,
     stdin: str | None = None,
@@ -76,7 +75,7 @@ def _run(
     ):
         return Error("--pty conflicts with stdin=/stdout=/stderr= redirection -- unset one")
 
-    SESSION.process = _launch.spawn_pydevd(run_ctx, run_ctx.args_opt.pty)
+    SESSION.process = launch.spawn_pydevd(run_ctx, run_ctx.args_opt.pty)
     prefix_lines.append(f"launched pid={SESSION.process.child.pid}")
 
     if SESSION.process.master_fd is not None:
