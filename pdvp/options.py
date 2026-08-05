@@ -5,10 +5,11 @@ registered here, regardless of which "kind" of option they are (pydevd CLI
 args, pydevd env vars, pydev-repl's own settings, ...). Adding a new group of
 options is just one `register()` call -- no new commands needed.
 """
+
 import dataclasses
 from typing import Any, Callable
 
-from . import launch
+from pdvp import launch
 
 Reflection = Callable[[str], Any]
 
@@ -139,3 +140,4 @@ def list_options() -> list[tuple[str, Any]]:
         for f in dataclasses.fields(group.target):
             result.append((f.name, getattr(group.target, f.name)))
     return result
+

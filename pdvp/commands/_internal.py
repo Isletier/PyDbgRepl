@@ -13,7 +13,7 @@ import tty
 
 from .. import dap as _dap
 from ..session import SESSION
-from ._display import Error, StopResult
+from pdvp.model import Error, StopResult
 
 # Hooks run from _report_stopped() to compute the returned StopResult's
 # `suffix` (extra lines shown after "*** stopped ..."), e.g. to auto-clear a

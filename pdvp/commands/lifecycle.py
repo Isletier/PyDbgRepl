@@ -7,7 +7,7 @@ from pdvp.commands.breakpoints import commit_all
 from .. import dap as _dap
 from pdvp import launch
 from ..session import SESSION
-from ._display import Error, Status, StopResult
+from pdvp.model import Error, Status, StopResult
 from ._internal import (
     _clear_dap_state,
     _end_session,
@@ -49,6 +49,7 @@ def _run(
     stdout: str | None = None,
     stderr: str | None = None,
 ) -> StopResult | Error:
+    prefix_lines = []
     if SESSION.client is not None or SESSION.process is not None:
         prefix_lines.append("killing previous instance")
         _stop_session()

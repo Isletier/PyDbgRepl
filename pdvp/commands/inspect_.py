@@ -2,7 +2,7 @@
 from .. import dap as _dap
 from ..session import SESSION
 from . import _internal
-from ._display import CompletionList, Error, ExceptionInfo, Scope, Status
+from pdvp.model import CompletionList, Error, ExceptionInfo, Scope, Status
 from ._internal import _ensure_dap_paused
 
 __all__ = [

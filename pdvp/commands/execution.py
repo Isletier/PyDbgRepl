@@ -7,7 +7,7 @@ from .. import dap as _dap
 from ..session import SESSION
 from .breakpoints import breakpoint as _set_breakpoint
 from .breakpoints import clear as _clear_breakpoint
-from ._display import Error, Status, StopResult
+from pdvp.model import Error, Status, StopResult
 from ._internal import (
     _current_location,
     _ensure_thread_paused,

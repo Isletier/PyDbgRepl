@@ -1,8 +1,8 @@
 """Generic option get/set, e.g. set("port", 5678) or set("vm_type", "jython")."""
 from .. import launch as launch
 from .. import options as _options
-from ..session import SESSION
-from ._display import Error, Status
+from pdvp.session import SESSION
+from pdvp.model import Error, Status
 
 __all__ = ["set", "get", "reset"]
 

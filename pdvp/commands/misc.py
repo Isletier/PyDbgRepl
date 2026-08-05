@@ -1,7 +1,7 @@
 """Misc / introspection: modules, pydevd_info."""
 from .. import dap as _dap
 from ..session import SESSION
-from ._display import Error, InfoSections, ModuleList
+from pdvp.model import Error, InfoSections, ModuleList
 
 __all__ = ["modules", "pydevd_info"]
 

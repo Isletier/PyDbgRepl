@@ -23,7 +23,7 @@ class SourceMap:
 
     def _fetch(self, source: dap.Source) -> SourcePath:
         from pdvp.session import SESSION
-        responce = SESSION.client.source(ref, source)
+        responce = SESSION.client.source(source.sourceReference, source)
 
         name: str= str(source.sourceReference)
         if source.name is not None:
@@ -48,16 +48,9 @@ class SourceMap:
             return
 
         if source.sourceReference is None:
-            if os.path.exists(source.path):
-                #don't register anything, just pass directly
-                self._Path2Source[source.path] = source
-                return source.path
-            else:
-                #should not happend, but just in case
-                #create temporary anyway, treat recived path as an id
-                path = self._fetch(source)
-                self._register_pair(source, path)
-                return path
+            #don't register anything, just pass directly
+            self._Path2Source[source.path] = source
+            return source.path
 
         # ref presented, check if already fetched
         Id: SourceId = [source.path, source.sourceReference]

@@ -1,6 +1,6 @@
 """Thread and stack-frame navigation: threads, thread, bt, frame, up, down."""
 from ..session import SESSION
-from ._display import Error, FrameRef, FrameList, Status, ThreadList
+from pdvp.model import Error, FrameRef, FrameList, Status, ThreadList
 from ._internal import _ensure_thread_paused
 
 __all__ = ["threads", "thread", "bt", "frame", "up", "down"]

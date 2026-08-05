@@ -1,5 +1,5 @@
 """Source listing: list()/l()."""
-from ._display import Error, SourceLines
+from pdvp.model import Error, SourceLines
 from ._internal import _current_location
 
 __all__ = ["ls", "l"]

@@ -2,9 +2,10 @@
 """Entry point: ./repl.py [pydevd options] [--batch] [--file script.py [script args...]]"""
 import sys
 
-import pdvp
+from pdvp import *
+from ptpython.repl import embed
 
-pdvp.process_args_envs(sys.argv[1:])
+process_args_envs(sys.argv[1:])
 
 # user customization goes here, e.g.:
 # debug.set("log_level", "debug")
@@ -14,11 +15,12 @@ pdvp.process_args_envs(sys.argv[1:])
 # keybindings.bind("f11", "locals()")
 
 
-pdvp.breakpoint("prototype/pydev_repl/examples/counter.py", 3)
-pdvp.fbreak("count")
-pdvp.run("prototype/pydev_repl/examples/counter.py")
+breakpoint("prototype/pydev_repl/examples/counter.py", 3)
+fbreak("count")
+run("prototype/pydev_repl/examples/counter.py")
 
-pdvp.start_eval()
+
+#pdvp.start_eval()
 
 # optional "scenario" lines go here, e.g.:
 # cont()

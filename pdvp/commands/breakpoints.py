@@ -1,4 +1,10 @@
-"""Breakpoints: breakpoint, clear, catch, tbreak, enable/disable, ignore, funcbreak."""
+"""Breakpoint submodule. This module provides basic commands for managing breakpoints within debug session. Avaliable commands are:
+    breakpoint(*args) -> model.Breakpoint | None 
+     - a general wrapper for various brekpoint commands type creation, a concrete command depends on provided args tuple types, see below
+    sbreak(*args, condition: str | None = None, hit_condition: str | None = None, log_message: str | None = None) -> model.SourceBreakpoint
+     - a command for creating "source" breakpoint - a breakpoint associated with exact path:line, the *args is either just a line number and therefore a source is assciated with current frame or combination of str, int corresponding to path, line.
+    TODO: finish
+    """
 
 import pdvp.model as model
 from pdvp.session import SESSION
@@ -157,7 +163,6 @@ def fbreak(func_name: str, condition: str | None = None, hitCondition: str | Non
 
 
 def breakpoint(*args) -> model.Breakpoint | None:
-
     match args:
         case [int() as line]:
             return sbreak(line)
@@ -217,17 +222,4 @@ def disable(Id: int):
 def breakpoints():
     """All breakpoints, function breakpoints, and exception filters."""
     return SESSION.Breakpoints
-
-
-#def _on_stopped(reason: str | None, top: dict | None) -> str | None:
-#    if reason != "breakpoint" or top is None:
-#        return None
-#    path = (top.get("source") or {}).get("path")
-#    line = top.get("line")
-#    if (path, line) in SESSION.temporary_breakpoints:
-#        return str(clear(path, line))
-#    return None
-#
-#
-#_internal.post_stop_hooks.append(_on_stopped)
 
