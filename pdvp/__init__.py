@@ -2,17 +2,18 @@
 
 Typical wrapper script:
 
-    import src as debug
+    import pdvp as debug
 
     debug.process_args_envs(sys.argv[1:])
 
-    # optional: debug.set("log_level", "debug")
+    # optional: debug.config.log_level = "debug"
 
     debug.start_eval()
 
     # optional: plain Python "scenario" lines go here, e.g. cont(), bt(5), ...
 
-start_eval() injects the REPL commands into __main__ and returns. Any
+start_eval() injects the REPL commands (and `config`) into __main__ and
+returns. Any
 scenario lines after it run as a normal script body. Once the script body
 finishes, an interactive prompt (ptpython, or readline via
 code.InteractiveConsole) takes over with __main__'s namespace -- unless
@@ -33,29 +34,31 @@ from .commands import *  # noqa: F401,F403
 from .commands import __all__ as _commands_all
 from .session import SESSION  # noqa: F401
 
-__all__ = [*_commands_all, "process_args_envs", "start_eval"]
+#: The live configuration. Assign to it directly: `pdvp.config.port = 5678`.
+config = SESSION.config
+
+__all__ = [*_commands_all, "process_args_envs", "start_eval", "config"]
 
 
-def process_args_envs(argv: list[str] | None = None, env: dict[str, str] | None = None) -> None:
-    """Populate RUN_CTX from the launch command line and environment.
+def process_args_envs(argv: list[str] | None = None) -> None:
+    """Populate `config` from the launch command line, and tidy the environment.
 
     Does not start anything, even if --file was given (it is just saved to
-    RUN_CTX for start_eval()/run() to pick up later).
+    `config` for start_eval()/run() to pick up later).
 
-    `--batch` is consumed here (not forwarded to pydevd): it sets
-    SESSION.options.interactive = False, so start_eval() won't drop into an
-    interactive prompt once the script body finishes.
+    Environment handling is deliberately near-zero: pydevd is configured
+    through os.environ like any other program, so the only thing we do is drop
+    inherited debug settings that would otherwise make us adopt another
+    debugger's configuration (launch.ENV_SANITIZE). Assign to os.environ
+    yourself, before or after this call -- later assignments win, and the
+    inferior inherits our environment as-is.
     """
     argv = sys.argv[1:] if argv is None else argv
-    env = os.environ if env is None else env
 
-    if "--batch" in argv:
-        argv = [a for a in argv if a != "--batch"]
-        SESSION.options.interactive = False
+    launch.scrub_env()
 
     try:
-        launch.process_args(SESSION.run_ctx, argv)
-        launch.process_envs(SESSION.run_ctx, env)
+        launch.parse_argv(SESSION.config, argv)
     except launch.LaunchError as e:
         print(f"error: {e}")
         raise SystemExit(1)
@@ -73,7 +76,7 @@ def _sigint_handler(signum, frame) -> None:
 
 
 def _ptpython_enabled() -> bool:
-    ui = SESSION.options.ui
+    ui = SESSION.config.ui
     if ui == "readline":
         return False
     try:
@@ -166,7 +169,7 @@ def start_eval() -> None:
     """
     signal.signal(signal.SIGINT, _sigint_handler)
 
-    if SESSION.run_ctx.args_opt.file is not None:
+    if SESSION.config.file is not None:
         # Mirror the REPL's own repr-echo of run()'s result, since this call
         # happens before the prompt (and its repl-echo machinery) exists.
         #print(repr(_commands.run()))
@@ -175,6 +178,8 @@ def start_eval() -> None:
     import __main__
     for name in _commands_all:
         setattr(__main__, name, getattr(_commands, name))
+    # so that `config.port = 5678` works at the prompt, not just `pdvp.config`
+    setattr(__main__, "config", SESSION.config)
 
-    if SESSION.options.interactive:
+    if SESSION.config.interactive:
         _enter_repl()

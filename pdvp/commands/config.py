@@ -1,72 +1,39 @@
-"""Generic option get/set, e.g. set("port", 5678) or set("vm_type", "jython")."""
-from .. import launch as launch
+"""Restoring configuration defaults.
+
+Setting and reading options is plain attribute access on `pdvp.config` --
+`config.port = 5678`, `config.port` -- so there is nothing here for that. What
+attribute access can't express is "put it back the way it was", which is what
+reset() is for.
+"""
+import dataclasses
+
 from .. import options as _options
 from pdvp.session import SESSION
 from pdvp.model import Error, Status
 
-__all__ = ["set", "get", "reset"]
-
-# Group names resettable as a unit via reset(), beyond _options.group_names()
-# ("args_opt", "env", "repl"): the inferior's argv, which lives directly on
-# RunContext rather than in an OptionGroup.
-_ARGS_GROUP = "args"
+__all__ = ["reset"]
 
 
-def set(name: str, value) -> Status | Error:
-    """Set an option, e.g. set("port", 5678) or set("vm_type", "jython")."""
-    try:
-        result = _options.set_option(name, value)
-    except KeyError:
-        return Error(f"unknown option '{name}'")
-    except (launch.LaunchError, ValueError) as e:
-        return Error(str(e))
-    return Status(f"{name} = {result!r}")
+def reset(*names: str) -> Status | Error:
+    """Restore config fields to their defaults, e.g. reset("port"). No
+    arguments resets every field.
 
-
-def get(name: str) -> Status | Error:
-    """Get the current value of an option, or every option in a group.
-
-    `name` is either a single option name (e.g. "port") or a group name:
-    "args_opt"/"env"/"repl" (the corresponding RunContext/ReplOptions
-    dataclasses), or "args" (the inferior's argv).
+    Note that `port` defaults to a fresh random port, so resetting it gives a
+    new one rather than the one this session started with.
     """
-    if name == _ARGS_GROUP:
-        return Status(f"args = {SESSION.run_ctx.args!r}")
+    fields = {f.name: f for f in dataclasses.fields(SESSION.config)}
 
-    try:
-        values = _options.get_group(name)
-    except KeyError:
-        pass
-    else:
-        return Status("\n".join(f"{opt_name} = {value!r}" for opt_name, value in values.items()))
+    if not names:
+        names = tuple(fields)
 
-    try:
-        value = _options.get_option(name)
-    except KeyError:
-        return Error(f"unknown option or group '{name}'")
-    return Status(f"{name} = {value!r}")
+    unknown = [name for name in names if name not in fields]
+    if unknown:
+        return Error(f"unknown option{'s' if len(unknown) > 1 else ''}: {', '.join(unknown)}")
 
+    lines = []
+    for name in names:
+        default = _options.default_of(fields[name])
+        setattr(SESSION.config, name, default)
+        lines.append(f"{name} = {default!r}")
 
-def reset(name: str) -> Status | Error:
-    """Reset an option, or a whole group of options, to defaults.
-
-    `name` is either a single option name (e.g. "port") or a group name:
-    "args_opt"/"env"/"repl" (the corresponding RunContext/ReplOptions
-    dataclasses), or "args" (the inferior's argv, reset to []).
-    """
-    if name == _ARGS_GROUP:
-        SESSION.run_ctx.args = []
-        return Status("args = []")
-
-    try:
-        defaults = _options.reset_group(name)
-    except KeyError:
-        pass
-    else:
-        return Status("\n".join(f"{opt_name} = {value!r}" for opt_name, value in defaults.items()))
-
-    try:
-        default = _options.reset_option(name)
-    except KeyError:
-        return Error(f"unknown option or group '{name}'")
-    return Status(f"{name} = {default!r}")
+    return Status("\n".join(lines))

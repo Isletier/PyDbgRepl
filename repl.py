@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """Entry point: ./repl.py [pydevd options] [--batch] [--file script.py [script args...]]"""
 import sys
+import pdvp
 
-from pdvp import *
-from ptpython.repl import embed
-
-process_args_envs(sys.argv[1:])
+pdvp.process_args_envs(sys.argv[1:])
 
 # user customization goes here, e.g.:
-# debug.set("log_level", "debug")
+# pdvp.config.log_level = "debug"
 #
-# from src import keybindings
+# from pdvp import keybindings
 # keybindings.unbind("f12")
 # keybindings.bind("f11", "locals()")
 
 
-breakpoint("prototype/pydev_repl/examples/counter.py", 3)
-fbreak("count")
-run("prototype/pydev_repl/examples/counter.py")
+pdvp.breakpoint("prototype/pydev_repl/examples/counter.py", 3)
+pdvp.fbreak("count")
+pdvp.run("prototype/pydev_repl/examples/counter.py")
 
 
-#pdvp.start_eval()
+pdvp.start_eval()
 
 # optional "scenario" lines go here, e.g.:
 # cont()

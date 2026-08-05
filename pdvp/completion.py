@@ -4,6 +4,7 @@ See doc/completion_design.md for the design this implements.
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 
@@ -12,12 +13,7 @@ from prompt_toolkit.document import Document
 
 from . import commands as _commands
 from . import dap as _dap
-from . import options as _options
 from .session import SESSION
-
-# Fallback for catch()'s exception-filter completions when not connected
-# (no `initialize` response yet to read `exceptionBreakpointFilters` from).
-_DEFAULT_EXCEPTION_FILTERS = ["raised", "uncaught", "userUnhandled"]
 
 # Per-command argument completion kinds, by positional argument index.
 # A bare string (rather than a list) applies to every argument position --
@@ -33,9 +29,7 @@ _ARG_TABLE: dict[str, list[str | None] | str] = {
     "thread": ["thread_id"],
     "frame": ["frame_index"],
     "catch": "exception_filter",
-    "set": ["option_name", None],
-    "get": ["reset_target"],
-    "reset": ["reset_target"],
+    "reset": "option_name",
 }
 
 # run()'s keyword-only stdio-redirection arguments -- discoverable from any
@@ -80,7 +74,7 @@ class DebuggerCompleter(Completer):
         self.wrapped = wrapped
 
     def get_completions(self, document: Document, complete_event):
-        if SESSION.options.completion == "classical":
+        if SESSION.config.completion == "classical":
             yield from self.wrapped.get_completions(document, complete_event)
             return
 
@@ -140,8 +134,6 @@ class DebuggerCompleter(Completer):
             yield from _quoted_completions(arg_text, _exception_filter_completions)
         elif kind == "option_name":
             yield from _quoted_completions(arg_text, _option_name_completions)
-        elif kind == "reset_target":
-            yield from _quoted_completions(arg_text, _reset_target_completions)
 
     def _run_arg_completions(self, arg_index: int, arg_text: str):
         """Completions for run()'s arguments: `script`, `*args`, and the
@@ -276,26 +268,11 @@ def _quoted_completions(arg_text: str, candidates_fn):
 
 
 def _exception_filter_completions(fragment: str) -> list[str]:
-    filters = SESSION.capabilities.get("exceptionBreakpointFilters")
-    if filters:
-        ids = [f["filter"] for f in filters]
-    else:
-        ids = list(_DEFAULT_EXCEPTION_FILTERS)
-    return [f for f in ids if f.startswith(fragment)]
+    return [f for f in _dap.EXCEPTION_BREAKPOINT_FILTERS if f.startswith(fragment)]
 
 
 def _option_name_completions(fragment: str) -> list[str]:
-    return [name for name, _ in _options.list_options() if name.startswith(fragment)]
-
-
-# Group resettable as a unit via reset(), beyond _options.group_names()
-# ("args_opt"/"env"/"repl"): the inferior's argv, see commands/config.py.
-_RESET_ARGS_GROUP = "args"
-
-
-def _reset_target_completions(fragment: str) -> list[str]:
-    names = _options.group_names() + [_RESET_ARGS_GROUP] + [n for n, _ in _options.list_options()]
-    return [name for name in names if name.startswith(fragment)]
+    return [f.name for f in dataclasses.fields(SESSION.config) if f.name.startswith(fragment)]
 
 
 def _project_files(cwd: str = ".") -> list[str]:

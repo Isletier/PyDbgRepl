@@ -18,12 +18,12 @@ def session(port: int, target_path: str, *args: str):
     The caller is responsible for the initialize/attach/configurationDone
     handshake (order and breakpoint setup varies per test).
     """
-    run_ctx = launch.RunContext()
-    run_ctx.args_opt.port = port
-    run_ctx.args_opt.file = target_path
-    run_ctx.args = list(args)
+    config = launch.Config()
+    config.port = port
+    config.file = target_path
+    config.args = list(args)
 
-    proc = launch.spawn_pydevd(run_ctx)
+    proc = launch.spawn_pydevd(config)
     try:
         time.sleep(STARTUP_DELAY)
 

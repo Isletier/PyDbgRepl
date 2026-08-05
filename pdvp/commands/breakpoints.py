@@ -1,5 +1,5 @@
 """Breakpoint submodule. This module provides basic commands for managing breakpoints within debug session. Avaliable commands are:
-    breakpoint(*args) -> model.Breakpoint | None 
+    breakpoint(*args) -> model.Breakpoint | None
      - a general wrapper for various brekpoint commands type creation, a concrete command depends on provided args tuple types, see below
     sbreak(*args, condition: str | None = None, hit_condition: str | None = None, log_message: str | None = None) -> model.SourceBreakpoint
      - a command for creating "source" breakpoint - a breakpoint associated with exact path:line, the *args is either just a line number and therefore a source is assciated with current frame or combination of str, int corresponding to path, line.
@@ -12,15 +12,14 @@ from pathlib import Path
 from pdvp.dap.client import Client
 import pdvp.schema.pydevd_schema as schema
 
+from ._internal import _current_file
+
 
 __all__ = [
     "breakpoint", "clear", "sbreak", "fbreak",
     "enable", "disable","breakpoints"
 ]
 
-
-def _send_breakpoints(path: str) -> None:
-    commit_source_breakpoints(path)
 
 def commit_all() -> None:
     sources: set[model.SourcePath] = set()
@@ -36,6 +35,19 @@ def commit_all() -> None:
         commit_source_breakpoints(source)
 
     commit_function_breakpoints()
+
+    return
+
+
+def invalidate_all() -> None:
+    """Forget what the (now dead) pydevd session told us about our breakpoints.
+
+    The breakpoints themselves survive teardown, gdb-style, but `verified` is
+    a fact about one debuggee process rather than about the breakpoint itself,
+    so it goes back to False. Called from _clear_dap_state().
+    """
+    for breakp in SESSION.Breakpoints.values():
+        breakp.verified = False
 
     return
 
@@ -70,30 +82,29 @@ def commit_source_breakpoints(path: model.SourcePath):
     if not responce.success:
         raise model.PDVPError()
 
-    for index, b in enumerate(responce.body.breakpoints):
+    for b, destination_breakpoint in zip(responce.body.breakpoints, source_br_list):
         source_breakpoint = schema.Breakpoint(**b)
         SESSION.sourceMap.register_source(source_breakpoint.source)
 
-        destination_breakpoint: model.SourceBreakpoint = SESSION.Breakpoints[source_br_list[index].ID]
-
         destination_breakpoint.verified = source_breakpoint.verified
-        destination_breakpoint.line = source_breakpoint.line
+        # pydevd may slide a breakpoint onto the next executable line, and the
+        # breakpoint's location follows that resolution. A breakpoint that
+        # failed to verify comes back with no line at all -- keep ours then.
+        if source_breakpoint.line is not None:
+            destination_breakpoint.line = source_breakpoint.line
         destination_breakpoint.path = path
 
     return
 
 
 def sbreak(*args, condition: str | None = None, hit_condition: str | None = None, log_message: str | None = None) -> model.SourceBreakpoint:
-    path = "CURRENT_PATH_CURRENTLY_NOT_IMPLEMENTED"
-    line = None
-
     match args:
-        case [int(l), *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
-            line = l
+        case [int(line)]:
+            path = _current_file()
+            if path is None:
+                raise model.PDVPError("no current file (pass an explicit path)")
+        case [str(path), int(line)]:
             pass
-        case [str(p), int(l), *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
-            path = p
-            line = l
         case _:
             raise TypeError("Invalid argument types for sbreak call")
 
@@ -135,13 +146,11 @@ def commit_function_breakpoints():
 
     responce = SESSION.client.set_function_breakpoints(serialized_br)
     if not responce.success:
-        raise model.PDVPError
+        raise model.PDVPError()
 
-    for index, b in enumerate(responce.body.breakpoints):
+    for b, destination_breakpoint in zip(responce.body.breakpoints, func_br_list):
         source_breakpoint = schema.Breakpoint(**b)
         SESSION.sourceMap.register_source(source_breakpoint.source)
-
-        destination_breakpoint: model.FunctionBreakpoint = SESSION.Breakpoints[func_br_list[index].ID]
 
         destination_breakpoint.verified = source_breakpoint.verified
 
@@ -170,23 +179,24 @@ def breakpoint(*args) -> model.Breakpoint | None:
             return sbreak(path, line);
         case [str() as path, int() as line, *rest] if len(rest) <= 3 and all(isinstance(x, str) for x in rest):
             cond, hit, log = rest + [None] * (3 - len(rest))
-            return sbreak(line, path, cond, hit, log)
+            return sbreak(path, line, condition=cond, hit_condition=hit, log_message=log)
         case [str() as func_name, *rest] if len(rest) <= 2 and all(isinstance(x, str) for x in rest):
             cond, hit = rest + [None] * (2 - len(rest))
             return fbreak(func_name, cond, hit)
 
-    raise model.PDVPError()
+    raise model.PDVPError("invalid arguments for breakpoint()")
 
 
 def clear(Id: int):
+    """Forget breakpoint `Id` entirely."""
     match bp := SESSION.Breakpoints.get(Id):
-        case model.SourceBreakpoint:
+        case model.SourceBreakpoint():
             source = bp.path
-            SESSION.Breakpoints[Id] = None
+            del SESSION.Breakpoints[Id]
             commit_source_breakpoints(source)
             pass
-        case model.FunctionBreakpoint:
-            SESSION.Breakpoints[Id] = None
+        case model.FunctionBreakpoint():
+            del SESSION.Breakpoints[Id]
             commit_function_breakpoints()
             pass
         case None:
@@ -197,13 +207,13 @@ def clear(Id: int):
 def _set_enable(Id: int, flag: bool):
     """Re-enable a breakpoint without forgetting its condition/etc."""
     match bp := SESSION.Breakpoints.get(Id):
-        case model.SourceBreakpoint:
+        case model.SourceBreakpoint():
             source = bp.path
-            SESSION.Breakpoints[Id].enabled = True
+            SESSION.Breakpoints[Id].enabled = flag
             commit_source_breakpoints(source)
             pass
-        case model.FunctionBreakpoint:
-            SESSION.Breakpoints[Id].enabled = True
+        case model.FunctionBreakpoint():
+            SESSION.Breakpoints[Id].enabled = flag
             commit_function_breakpoints()
             pass
         case None:
@@ -213,10 +223,10 @@ def _set_enable(Id: int, flag: bool):
 
 
 def enable(Id: int):
-    _set_enable(Id, true)
+    _set_enable(Id, True)
 
 def disable(Id: int):
-    _set_enable(Id, false)
+    _set_enable(Id, False)
 
 
 def breakpoints():

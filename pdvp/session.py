@@ -1,12 +1,15 @@
-"""Debugging session state: pydevd launch config plus our own REPL options."""
+"""Debugging session state: the whole lifetime of the program in one object.
+
+Fields are grouped by lifetime, because that is what decides who resets them:
+program-lifetime state deliberately survives run()/stop() cycles, while
+everything tied to one pydevd instance is cleared together by
+commands._internal._clear_dap_state(). Put a new field under the right heading.
+"""
 import dataclasses
 import threading
-import pathlib
-import tempfile
-import os
 
 from . import launch
-from . import options as _options
+from .options import Config
 
 from . import dap
 from . import model
@@ -14,56 +17,25 @@ from . import source
 
 
 @dataclasses.dataclass
-class ReplOptions:
-    """Options for pydev-repl itself."""
-
-    dap_host: str = "127.0.0.1"
-    # REPL frontend: "auto" (ptpython if installed, else plain readline),
-    # "ptpython", or "readline".
-    ui: str = "auto"
-    # Tab-completion mode (ptpython only): "debugger" (command-aware) or
-    # "classical" (ptpython's normal jedi-based completion). Read live on
-    # every completion request -- no restart needed.
-    completion: str = "debugger"
-    # If True (default), start_eval() drops into an interactive prompt
-    # (ptpython or readline) once the script body finishes. If False
-    # (--batch), the process just exits after the script body runs -- for
-    # unattended automation scenarios. See doc/scenario_mode.md.
-    interactive: bool = True
-
-    source_catalog: str = os.path.realpath(tempfile.gettempdir())
-
-
-@dataclasses.dataclass
 class SessionState:
-    run_ctx: launch.RunContext = dataclasses.field(default_factory=launch.RunContext)
-    options: ReplOptions = dataclasses.field(default_factory=ReplOptions)
+    # ---- program lifetime: survives run()/stop(), reset by nothing ----
+    config:         Config = dataclasses.field(default_factory=Config)
+    Breakpoints:    dict[int, model.Breakpoint] = dataclasses.field(default_factory=dict)
+    displays:       list[dict] = dataclasses.field(default_factory=list)
 
+    # ---- pydevd core lifetime: cleared by _clear_dap_state() ----
     process: launch.LaunchedProcess | None = None
     client: dap.Client | None = None
-
     reader_thread: threading.Thread | None = None
     running: bool = False
     current_thread_id: int | None = None
     current_frame_id: int | None = None
-
+    # sourceReferences are only valid for one DAP session (per the spec), so
+    # this map cannot outlive the connection.
     sourceMap:      source.SourceMap = dataclasses.field(default_factory=source.SourceMap)
-    Breakpoints:    dict[int, model.Breakpoint] = dataclasses.field(default_factory=dict)
 
-    # `initialize` response, e.g. for `exceptionBreakpointFilters` (used by
-    # catch()'s tab-completion).
-    capabilities: dict = dataclasses.field(default_factory=dict)
-    displays: list[dict] = dataclasses.field(default_factory=list)
+    # ---- frontend lifetime ----
     ptpython_active: bool = False
 
 
 SESSION = SessionState()
-
-_options.register(SESSION.run_ctx.args_opt, {
-    "vm_type": launch.vm_type_reflection,
-    "log_level": launch.log_level_reflection,
-    "qt_support": launch.qt_support_reflection,
-}, name="args_opt")
-
-_options.register(SESSION.run_ctx.env, name="env")
-_options.register(SESSION.options, name="repl")

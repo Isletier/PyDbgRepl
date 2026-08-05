@@ -33,9 +33,9 @@ def run(
 
     `stdin`/`stdout`/`stderr` redirect the inferior's streams to files
     (`stderr="&1"` aliases stdout), gdb-style; any unset stream keeps the
-    default owned-PTY-pair passthrough. Falls back to a previously
-    set("stdin"/"stdout"/"stderr", ...) value if omitted here. Mutually
-    exclusive with `set("pty", ...)`. See doc/io_model.md.
+    default owned-PTY-pair passthrough. Falls back to a previously assigned
+    config.stdin/stdout/stderr if omitted here. Mutually exclusive with
+    `config.pty`. See doc/io_model.md.
 
     If a session is already running, it's killed first (gdb-style restart).
     """
@@ -54,29 +54,30 @@ def _run(
         prefix_lines.append("killing previous instance")
         _stop_session()
 
-    run_ctx = SESSION.run_ctx
+    config = SESSION.config
     if script is not None:
-        run_ctx.args_opt.file = script
-        run_ctx.args = list(args)
+        config.file = script
+        config.args = list(args)
 
-    if run_ctx.args_opt.file is None:
+    if config.file is None:
         return Error("no script given (pass one to run(), or --file at startup)")
 
     if stdin is not None:
-        run_ctx.args_opt.stdin = stdin
+        config.stdin = stdin
     if stdout is not None:
-        run_ctx.args_opt.stdout = stdout
+        config.stdout = stdout
     if stderr is not None:
-        run_ctx.args_opt.stderr = stderr
+        config.stderr = stderr
 
-    if run_ctx.args_opt.pty is not None and (
-        run_ctx.args_opt.stdin is not None
-        or run_ctx.args_opt.stdout is not None
-        or run_ctx.args_opt.stderr is not None
-    ):
-        return Error("--pty conflicts with stdin=/stdout=/stderr= redirection -- unset one")
+    # The configuration stops being a half-edited draft here: normalize() turns
+    # convenience strings into real values and rejects the rest, and
+    # spawn_pydevd() owns the pty-vs-redirection conflict.
+    try:
+        launch.normalize(config)
+        SESSION.process = launch.spawn_pydevd(config)
+    except launch.LaunchError as e:
+        return Error(str(e))
 
-    SESSION.process = launch.spawn_pydevd(run_ctx, run_ctx.args_opt.pty)
     prefix_lines.append(f"launched pid={SESSION.process.child.pid}")
 
     if SESSION.process.master_fd is not None:
@@ -119,6 +120,21 @@ def connect() -> StopResult | Error:
     return _connect()
 
 
+def _check_capabilities(response) -> None:
+    """Warn if the pydevd we reached disagrees with what we assume about it.
+
+    We target one debugger core, so its capabilities live as constants in our
+    code rather than as session state -- this is the one-time check that keeps
+    those constants honest.
+    """
+    reported = getattr(response.body, "exceptionBreakpointFilters", None) or []
+    names = [f.get("filter") if isinstance(f, dict) else getattr(f, "filter", None) for f in reported]
+    names = [n for n in names if n]
+
+    if names and names != _dap.EXCEPTION_BREAKPOINT_FILTERS:
+        print(f"warning: pydevd reports exception filters {names}, expected {_dap.EXCEPTION_BREAKPOINT_FILTERS}")
+
+
 def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | None = None) -> StopResult | Error:
     if prefix_lines is None:
         prefix_lines = []
@@ -126,8 +142,8 @@ def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | Non
     if SESSION.client is not None:
         return Error("already connected")
 
-    host = SESSION.options.dap_host
-    port = SESSION.run_ctx.args_opt.port
+    host = SESSION.config.dap_host
+    port = SESSION.config.port
 
     client = None
     for attempt in range(retries):
@@ -139,7 +155,7 @@ def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | Non
                 return Error(f"could not connect to {host}:{port}: {e}")
             time.sleep(delay)
 
-    SESSION.capabilities = client.initialize()
+    _check_capabilities(client.initialize())
     client.attach()
     client.wait_for_event("initialized", timeout=5)
 

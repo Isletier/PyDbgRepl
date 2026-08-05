@@ -59,10 +59,22 @@ def _async_print(message: str) -> None:
 # ---- session lifetime ----
 
 def _clear_dap_state() -> None:
+    """Reset everything whose lifetime is the pydevd connection.
+
+    Called by _end_session(), and directly by disconnect() -- which leaves the
+    debuggee running but still ends our DAP session, so its sourceReferences
+    and breakpoint verifications are just as dead either way.
+    """
+    # Imported here rather than at module level: commands.breakpoints imports
+    # _internal (for _current_file), so the module-level edge only goes one way.
+    from .breakpoints import invalidate_all
+
     SESSION.client = None
     SESSION.running = False
     SESSION.current_thread_id = None
     SESSION.current_frame_id = None
+    SESSION.sourceMap.clear()
+    invalidate_all()
 
 
 def _end_session() -> None:
@@ -254,7 +266,7 @@ def _current_location() -> tuple[str | None, int | None]:
                         return path, f.get("line")
         except _dap.DAPError:
             pass
-    return SESSION.run_ctx.args_opt.file, None
+    return SESSION.config.file, None
 
 
 def _current_file() -> str | None:

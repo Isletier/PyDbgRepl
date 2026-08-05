@@ -233,13 +233,16 @@ class StopResult:
         self.prefix = prefix
         self.suffix = suffix
 
+    # `body` is a schema event body (StoppedEventBody, ExitedEventBody, ...),
+    # except for the synthetic "_disconnected" event, whose body is a plain
+    # dict -- hence getattr rather than attribute access.
     @property
     def reason(self) -> str | None:
-        return self.body.get("reason") if self.event == "stopped" else None
+        return getattr(self.body, "reason", None) if self.event == "stopped" else None
 
     @property
     def exit_code(self) -> int | None:
-        return self.body.get("exitCode") if self.event == "exited" else None
+        return getattr(self.body, "exitCode", None) if self.event == "exited" else None
 
     def __repr__(self) -> str:
         if self.event == "stopped":
