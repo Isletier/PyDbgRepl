@@ -5,8 +5,6 @@ single flat namespace, matching the old single-file `commands.py` layout.
 """
 from .breakpoints import *  # noqa: F401,F403
 from .breakpoints import __all__ as _breakpoints_all
-from .config import *  # noqa: F401,F403
-from .config import __all__ as _config_all
 from .execution import *  # noqa: F401,F403
 from .execution import __all__ as _execution_all
 from .inspect_ import *  # noqa: F401,F403
@@ -30,7 +28,6 @@ from .stack import __all__ as _stack_all
 
 __all__ = [
     *_lifecycle_all,
-    *_config_all,
     *_execution_all,
     *_stack_all,
     *_breakpoints_all,

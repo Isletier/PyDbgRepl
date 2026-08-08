@@ -221,23 +221,77 @@ def test_parse_emit_round_trip() -> None:
         assert getattr(first, f.name) == getattr(second, f.name), f.name
 
 
-# ---- reset ----
+# ---- restoring defaults ----
 
-def test_reset() -> None:
-    from ..commands.config import reset
+def test_del_restores_one_field() -> None:
+    config = Config()
+    config.log_level = LogLevel.DEBUG
+    config.ui = "readline"
+
+    del config.log_level
+    assert config.log_level is LogLevel.CRITICAL
+    assert config.ui == "readline"  # neighbours untouched
+
+
+def test_del_never_leaves_a_field_missing() -> None:
+    """The point of __delattr__: with slots=True a real delete would make
+    every later read of the field raise."""
+    config = Config()
+    for name in options.field_table():
+        delattr(config, name)
+        getattr(config, name)  # raises AttributeError if the slot went empty
+
+
+def test_del_reruns_the_default_factory() -> None:
+    config = Config()
+    started_on = config.port
+    config.port = 5678
+
+    del config.port
+    assert config.port != 5678
+    assert 20000 <= config.port <= 65000
+    # A factory default is re-evaluated, so this is a fresh draw rather than
+    # the port the config was built with. Documented, not a bug.
+    del config.args
+    assert config.args == [] and config.args is not Config().args
+
+
+def test_del_unknown_name_raises() -> None:
+    config = Config()
+    for name in ("prot", "__doc__"):
+        try:
+            delattr(config, name)
+        except AttributeError:
+            continue
+        raise AssertionError(f"expected AttributeError for del config.{name}")
+
+
+def test_reset_restores_everything_in_place() -> None:
+    config = Config()
+    config.log_level = LogLevel.DEBUG
+    config.ui = "readline"
+    config.file = "script.py"
+    config.args = ["--foo"]
+
+    config.reset()
+
+    assert config.log_level is LogLevel.CRITICAL
+    assert config.ui == "auto"
+    assert config.file is None  # --file goes too
+    assert config.args == []
+
+
+def test_reset_keeps_the_object_identity() -> None:
+    """`pdvp.config` and `SESSION.config` are the same object; reset() must
+    not rebind either of them."""
     from ..session import SESSION
 
-    SESSION.config.log_level = LogLevel.DEBUG
-    SESSION.config.ui = "readline"
+    config = SESSION.config
+    config.ui = "readline"
+    config.reset()
 
-    assert reset("log_level")
-    assert SESSION.config.log_level is LogLevel.CRITICAL
-    assert SESSION.config.ui == "readline"  # untouched
-
-    assert reset()
-    assert SESSION.config.ui == "auto"
-
-    assert not reset("prot")  # unknown name -> Error, which is falsy
+    assert SESSION.config is config
+    assert config.ui == "auto"
 
 
 TESTS = [
@@ -259,7 +313,12 @@ TESTS = [
     test_file_is_last_flag_and_args_follow,
     test_every_spawn_field_reaches_the_argv,
     test_parse_emit_round_trip,
-    test_reset,
+    test_del_restores_one_field,
+    test_del_never_leaves_a_field_missing,
+    test_del_reruns_the_default_factory,
+    test_del_unknown_name_raises,
+    test_reset_restores_everything_in_place,
+    test_reset_keeps_the_object_identity,
 ]
 
 

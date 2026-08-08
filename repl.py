@@ -7,6 +7,7 @@ pdvp.process_args_envs(sys.argv[1:])
 
 # user customization goes here, e.g.:
 # pdvp.config.log_level = "debug"
+# del pdvp.config.log_level     # back to the default; config.reset() for all
 #
 # from pdvp import keybindings
 # keybindings.unbind("f12")

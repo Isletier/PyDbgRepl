@@ -4,7 +4,6 @@ See doc/completion_design.md for the design this implements.
 """
 from __future__ import annotations
 
-import dataclasses
 import os
 import subprocess
 
@@ -29,7 +28,6 @@ _ARG_TABLE: dict[str, list[str | None] | str] = {
     "thread": ["thread_id"],
     "frame": ["frame_index"],
     "catch": "exception_filter",
-    "reset": "option_name",
 }
 
 # run()'s keyword-only stdio-redirection arguments -- discoverable from any
@@ -132,8 +130,6 @@ class DebuggerCompleter(Completer):
             yield from self._frame_index_completions(arg_text)
         elif kind == "exception_filter":
             yield from _quoted_completions(arg_text, _exception_filter_completions)
-        elif kind == "option_name":
-            yield from _quoted_completions(arg_text, _option_name_completions)
 
     def _run_arg_completions(self, arg_index: int, arg_text: str):
         """Completions for run()'s arguments: `script`, `*args`, and the
@@ -269,10 +265,6 @@ def _quoted_completions(arg_text: str, candidates_fn):
 
 def _exception_filter_completions(fragment: str) -> list[str]:
     return [f for f in _dap.EXCEPTION_BREAKPOINT_FILTERS if f.startswith(fragment)]
-
-
-def _option_name_completions(fragment: str) -> list[str]:
-    return [f.name for f in dataclasses.fields(SESSION.config) if f.name.startswith(fragment)]
 
 
 def _project_files(cwd: str = ".") -> list[str]:

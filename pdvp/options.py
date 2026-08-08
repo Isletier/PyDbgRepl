@@ -2,6 +2,8 @@
 
     pdvp.config.port = 5678
     pdvp.config.log_level = "debug"     # normalized to LogLevel at run()
+    del pdvp.config.log_level           # back to its default
+    pdvp.config.reset()                 # all of them back
 
 Every option is described here and nowhere else. A field optionally carries:
 
@@ -212,6 +214,53 @@ class Config:
     # explicitly -- see launch.parse_argv()/build_spawn_argv().
     file: str | None = None
     args: list[str] = dataclasses.field(default_factory=list)
+
+    def __delattr__(self, name: str) -> None:
+        """`del config.port` puts one field back to its default -- the
+        counterpart to plain assignment, and the same gesture as
+        `del os.environ["X"]`.
+
+        Nothing is really deleted: with slots=True a real delete leaves the
+        field genuinely missing, and every later read of it would raise. We
+        re-apply the declared default instead, so "every field always has a
+        value" holds for every reader.
+
+        The default is whatever the field declares -- `del config.port` runs
+        `_random_port()` again and so hands back a *fresh* port, not the one
+        this session started on.
+        """
+        f = field_table().get(name)
+        if f is None:
+            # Not a field: object's own __delattr__ raises the normal
+            # AttributeError, so a typo fails the same either side of the `=`.
+            # Explicit rather than super(): dataclass(slots=True) can't add
+            # slots to an existing class, so it builds a replacement one, and
+            # the __class__ cell zero-arg super() reads still points at the
+            # original -- it would raise TypeError here.
+            object.__delattr__(self, name)
+            return
+
+        default = default_of(f)
+        if default is dataclasses.MISSING:
+            raise LaunchError(f"{name} declares no default to restore")
+        setattr(self, name, default)
+
+    def reset(self) -> None:
+        """Restore every field at once, including `file` and `args` -- the
+        script named by --file at startup goes too.
+
+        Delegates to __delattr__ so "default" has exactly one definition, and
+        mutates in place, so `pdvp.config` and `SESSION.config` keep pointing
+        at this same object.
+        """
+        for name in field_table():
+            delattr(self, name)
+
+
+@functools.cache
+def field_table() -> dict[str, dataclasses.Field]:
+    """Config's fields by name. Cached: the set is fixed at class creation."""
+    return {f.name: f for f in dataclasses.fields(Config)}
 
 
 @functools.cache
