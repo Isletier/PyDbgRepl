@@ -12,6 +12,7 @@ import threading
 import tty
 
 from .. import dap as _dap
+from ..config import CONFIG
 from ..session import SESSION
 from pdvp.model import Error, StopResult
 
@@ -266,7 +267,7 @@ def _current_location() -> tuple[str | None, int | None]:
                         return path, f.get("line")
         except _dap.DAPError:
             pass
-    return SESSION.config.file, None
+    return CONFIG.file, None
 
 
 def _current_file() -> str | None:

@@ -6,14 +6,14 @@ Typical wrapper script:
 
     debug.process_args_envs(sys.argv[1:])
 
-    # optional: debug.config.log_level = "debug"
+    # optional: debug.CONFIG.log_level = "debug"
 
     debug.start_eval()
 
     # optional: plain Python "scenario" lines go here, e.g. cont(), bt(5), ...
 
-start_eval() injects the REPL commands (and `config`) into __main__ and
-returns. Any
+start_eval() injects the REPL commands (and CONFIG, under the name `config`)
+into __main__ and returns. Any
 scenario lines after it run as a normal script body. Once the script body
 finishes, an interactive prompt (ptpython, or readline via
 code.InteractiveConsole) takes over with __main__'s namespace -- unless
@@ -33,18 +33,20 @@ from pdvp import launch
 from .commands import *  # noqa: F401,F403
 from .commands import __all__ as _commands_all
 from .session import SESSION  # noqa: F401
+#: The live configuration. Assign to it directly: `pdvp.CONFIG.port = 5678`.
+#: It lives in the `pdvp.config` module, which is why it is not itself named
+#: `config` -- `pdvp.config` is that module. At the prompt it *is* called
+#: `config`, because start_eval() injects it into __main__ under that name.
+from .config import CONFIG
 
-#: The live configuration. Assign to it directly: `pdvp.config.port = 5678`.
-config = SESSION.config
-
-__all__ = [*_commands_all, "process_args_envs", "start_eval", "config"]
+__all__ = [*_commands_all, "process_args_envs", "start_eval", "CONFIG"]
 
 
 def process_args_envs(argv: list[str] | None = None) -> None:
-    """Populate `config` from the launch command line, and tidy the environment.
+    """Populate CONFIG from the launch command line, and tidy the environment.
 
     Does not start anything, even if --file was given (it is just saved to
-    `config` for start_eval()/run() to pick up later).
+    CONFIG for start_eval()/run() to pick up later).
 
     Environment handling is deliberately near-zero: pydevd is configured
     through os.environ like any other program, so the only thing we do is drop
@@ -58,7 +60,7 @@ def process_args_envs(argv: list[str] | None = None) -> None:
     launch.scrub_env()
 
     try:
-        launch.parse_argv(SESSION.config, argv)
+        launch.parse_argv(CONFIG, argv)
     except launch.LaunchError as e:
         print(f"error: {e}")
         raise SystemExit(1)
@@ -76,7 +78,7 @@ def _sigint_handler(signum, frame) -> None:
 
 
 def _ptpython_enabled() -> bool:
-    ui = SESSION.config.ui
+    ui = CONFIG.ui
     if ui == "readline":
         return False
     try:
@@ -169,7 +171,7 @@ def start_eval() -> None:
     """
     signal.signal(signal.SIGINT, _sigint_handler)
 
-    if SESSION.config.file is not None:
+    if CONFIG.file is not None:
         # Mirror the REPL's own repr-echo of run()'s result, since this call
         # happens before the prompt (and its repl-echo machinery) exists.
         #print(repr(_commands.run()))
@@ -178,8 +180,8 @@ def start_eval() -> None:
     import __main__
     for name in _commands_all:
         setattr(__main__, name, getattr(_commands, name))
-    # so that `config.port = 5678` works at the prompt, not just `pdvp.config`
-    setattr(__main__, "config", SESSION.config)
+    # so that `config.port = 5678` works at the prompt, not just `pdvp.CONFIG`
+    setattr(__main__, "config", CONFIG)
 
-    if SESSION.config.interactive:
+    if CONFIG.interactive:
         _enter_repl()

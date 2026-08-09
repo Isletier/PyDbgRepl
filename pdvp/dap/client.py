@@ -52,8 +52,8 @@ class Client:
         self._reader_thread.start()
 
     @classmethod
-    def connect(cls, host: str, port: int) -> "DAPClient":
-        return cls(DAPTransport.connect(host, port))
+    def connect(cls, host: str, port: int, timeout: float | None = None, retry: int | None = None) -> "DAPClient":
+        return cls(DAPTransport.connect(host, port, timeout, retry))
 
     def close(self) -> None:
         if self.on_disconnect is not None:
@@ -69,10 +69,10 @@ class Client:
         while True:
             try:
                 responce_str = self._transport.recv()
-                message : schema.ProtocolMessage = base_schema.from_json(responce_str)
-            except Exception as e:
-                self.close()
-                raise e
+            except (ConnectionError):
+                return
+
+            message : schema.ProtocolMessage = base_schema.from_json(responce_str)
 
             if message.type == "response":
                 self._handle_response(message)

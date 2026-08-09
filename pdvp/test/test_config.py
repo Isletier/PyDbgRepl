@@ -11,8 +11,9 @@ Run from the repo root with the venv active:
 import dataclasses
 
 from .. import launch
-from .. import options
-from ..options import Config, LaunchError, LogLevel, QtSupport, VmType
+# Aliased: several tests use `config` as a local name for a Config instance.
+from .. import config as _config
+from ..config import CONFIG, Config, LaunchError, LogLevel, QtSupport, VmType
 
 
 def _expect_error(fn, needle: str) -> None:
@@ -27,26 +28,26 @@ def _expect_error(fn, needle: str) -> None:
 # ---- coercion ----
 
 def test_coerce_scalars() -> None:
-    assert options.coerce(int, "42", "port") == 42
-    assert options.coerce(float, "0.5", "x") == 0.5
-    assert options.coerce(str, "hi", "x") == "hi"
-    assert options.coerce(bool, "true", "x") is True
-    assert options.coerce(bool, "0", "x") is False
+    assert _config.coerce(int, "42", "port") == 42
+    assert _config.coerce(float, "0.5", "x") == 0.5
+    assert _config.coerce(str, "hi", "x") == "hi"
+    assert _config.coerce(bool, "true", "x") is True
+    assert _config.coerce(bool, "0", "x") is False
     # Optional[str] unwraps to str rather than falling through as a Union.
-    assert options.coerce(str | None, "hi", "x") == "hi"
+    assert _config.coerce(str | None, "hi", "x") == "hi"
 
 
 def test_coerce_enum() -> None:
-    assert options.coerce(LogLevel, "debug", "log_level") is LogLevel.DEBUG
-    assert options.coerce(VmType | None, "jython", "vm_type") is VmType.JYTHON
+    assert _config.coerce(LogLevel, "debug", "log_level") is LogLevel.DEBUG
+    assert _config.coerce(VmType | None, "jython", "vm_type") is VmType.JYTHON
 
 
 def test_coerce_rejects_bad_values() -> None:
     # The enum message must list the valid values -- that is the whole point
     # of handling enums generically instead of per-field reflection functions.
-    _expect_error(lambda: options.coerce(LogLevel, "verbos", "log_level"), "verbose")
-    _expect_error(lambda: options.coerce(int, "abc", "port"), "port")
-    _expect_error(lambda: options.coerce(bool, "maybe", "module"), "bool")
+    _expect_error(lambda: _config.coerce(LogLevel, "verbos", "log_level"), "verbose")
+    _expect_error(lambda: _config.coerce(int, "abc", "port"), "port")
+    _expect_error(lambda: _config.coerce(bool, "maybe", "module"), "bool")
 
 
 # ---- normalize ----
@@ -55,7 +56,7 @@ def test_normalize_accepts_convenience_strings() -> None:
     c = Config()
     c.log_level = "debug"
     c.qt_support = "none"
-    options.normalize(c)
+    _config.normalize(c)
     assert c.log_level is LogLevel.DEBUG
     assert c.qt_support is QtSupport.NONE
 
@@ -65,7 +66,7 @@ def test_normalize_reports_every_problem_at_once() -> None:
     c.log_level = "nope"
     c.port = "abc"
     try:
-        options.normalize(c)
+        _config.normalize(c)
     except LaunchError as e:
         assert "log_level" in str(e) and "port" in str(e), str(e)
         return
@@ -75,11 +76,11 @@ def test_normalize_reports_every_problem_at_once() -> None:
 def test_normalize_rejects_wrong_types() -> None:
     c = Config()
     c.interactive = 2
-    _expect_error(lambda: options.normalize(c), "interactive")
+    _expect_error(lambda: _config.normalize(c), "interactive")
 
     c = Config()
     c.port = True  # bool is a subclass of int; must not slip through
-    _expect_error(lambda: options.normalize(c), "port")
+    _expect_error(lambda: _config.normalize(c), "port")
 
 
 def test_typo_raises_attribute_error() -> None:
@@ -188,7 +189,7 @@ def test_every_spawn_field_reaches_the_argv() -> None:
     }
 
     for f in dataclasses.fields(Config):
-        spec = options.spec_of(f)
+        spec = _config.spec_of(f)
         if spec is None or spec.spawn is None:
             continue
         assert f.name in samples, f"no sample value for new spawn field {f.name!r}"
@@ -237,7 +238,7 @@ def test_del_never_leaves_a_field_missing() -> None:
     """The point of __delattr__: with slots=True a real delete would make
     every later read of the field raise."""
     config = Config()
-    for name in options.field_table():
+    for name in _config.field_table():
         delattr(config, name)
         getattr(config, name)  # raises AttributeError if the slot went empty
 
@@ -282,16 +283,18 @@ def test_reset_restores_everything_in_place() -> None:
 
 
 def test_reset_keeps_the_object_identity() -> None:
-    """`pdvp.config` and `SESSION.config` are the same object; reset() must
-    not rebind either of them."""
-    from ..session import SESSION
+    """Everything that reads the configuration holds the one CONFIG object --
+    `pdvp.CONFIG`, `pdvp.config.CONFIG`, and `config` at the prompt. reset()
+    must therefore mutate in place rather than rebind."""
+    import pdvp
 
-    config = SESSION.config
-    config.ui = "readline"
-    config.reset()
+    assert pdvp.CONFIG is CONFIG is _config.CONFIG
 
-    assert SESSION.config is config
-    assert config.ui == "auto"
+    CONFIG.ui = "readline"
+    CONFIG.reset()
+
+    assert pdvp.CONFIG is CONFIG
+    assert CONFIG.ui == "auto"
 
 
 TESTS = [

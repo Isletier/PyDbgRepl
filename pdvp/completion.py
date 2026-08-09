@@ -12,6 +12,7 @@ from prompt_toolkit.document import Document
 
 from . import commands as _commands
 from . import dap as _dap
+from .config import CONFIG
 from .session import SESSION
 
 # Per-command argument completion kinds, by positional argument index.
@@ -72,7 +73,7 @@ class DebuggerCompleter(Completer):
         self.wrapped = wrapped
 
     def get_completions(self, document: Document, complete_event):
-        if SESSION.config.completion == "classical":
+        if CONFIG.completion == "classical":
             yield from self.wrapped.get_completions(document, complete_event)
             return
 

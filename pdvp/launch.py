@@ -3,9 +3,12 @@ import dataclasses
 import os
 import pty
 import subprocess
+import time
 
-from . import options as _options
-from .options import (  # re-exported: callers say launch.LaunchError, launch.VmType, ...
+# Aliased: spawn_pydevd()/build_spawn_argv() take a parameter called `config`,
+# which would otherwise shadow the module.
+from . import config as _config
+from .config import (  # re-exported: callers say launch.LaunchError, launch.VmType, ...
     Config,
     LaunchError,
     LogLevel,
@@ -64,7 +67,7 @@ def _cli_table() -> dict[str, dataclasses.Field]:
     """{command-line spelling: field}, for every field that opted in."""
     table = {}
     for f in dataclasses.fields(Config):
-        spec = _options.spec_of(f)
+        spec = _config.spec_of(f)
         if spec is not None and spec.cli is not None:
             table[spec.cli] = f
     return table
@@ -85,7 +88,7 @@ def parse_argv(config: Config, argv: list[str]) -> None:
         args = args[:i]
 
     table = _cli_table()
-    resolved = _options.hints()
+    resolved = _config.hints()
 
     while args:
         flag, _, inline = args.pop(0).partition("=")
@@ -98,9 +101,9 @@ def parse_argv(config: Config, argv: list[str]) -> None:
                 raise LaunchError(f"pydevd original flag {flag} is enabled by default")
             raise LaunchError(f"unknown flag: {flag}")
 
-        spec = _options.spec_of(f)
+        spec = _config.spec_of(f)
 
-        if spec.style is _options.Style.FLAG:
+        if spec.style is _config.Style.FLAG:
             if inline:
                 raise LaunchError(f"{flag} takes no value")
             setattr(config, f.name, not spec.invert)
@@ -111,23 +114,23 @@ def parse_argv(config: Config, argv: list[str]) -> None:
                 raise LaunchError(f"expected parameter value for {flag}")
             inline = args.pop(0)
 
-        setattr(config, f.name, _options.coerce(resolved[f.name], inline, f.name))
+        setattr(config, f.name, _config.coerce(resolved[f.name], inline, f.name))
 
 
 # ---- command line out ----
 
-def _emit(spec: _options.OptSpec, value, default) -> list[str]:
-    if spec.style is _options.Style.FLAG:
+def _emit(spec: _config.OptSpec, value, default) -> list[str]:
+    if spec.style is _config.Style.FLAG:
         return [spec.spawn] if value else []
 
-    if spec.emit is _options.Emit.IF_SET and value is None:
+    if spec.emit is _config.Emit.IF_SET and value is None:
         return []
-    if spec.emit is _options.Emit.IF_CHANGED and value == default:
+    if spec.emit is _config.Emit.IF_CHANGED and value == default:
         return []
 
     wire = spec.wire(value) if spec.wire is not None else str(getattr(value, "value", value))
 
-    if spec.style is _options.Style.JOINED:
+    if spec.style is _config.Style.JOINED:
         return [f"{spec.spawn}={wire}"]
     return [spec.spawn, wire]
 
@@ -138,10 +141,10 @@ def build_spawn_argv(config: Config) -> list[str]:
     argv.extend(OBLIGATORY_RUN_ARGUMENTS)
 
     for f in dataclasses.fields(config):
-        spec = _options.spec_of(f)
+        spec = _config.spec_of(f)
         if spec is None or spec.spawn is None:
             continue
-        argv += _emit(spec, getattr(config, f.name), _options.default_of(f))
+        argv += _emit(spec, getattr(config, f.name), _config.default_of(f))
 
     # Not in the spec table: pydevd requires --file to be the final flag, with
     # the inferior's own argv after it.
@@ -230,4 +233,8 @@ def spawn_pydevd(config: Config) -> LaunchedProcess:
         for fd in opened_fds:
             os.close(fd)
 
-    return LaunchedProcess(child=child, master_fd=master_fd, stdin_is_pty=config.stdin is None)
+    process = LaunchedProcess(child=child, master_fd=master_fd, stdin_is_pty=config.stdin is None)
+
+    time.sleep(config.default_server_start_delay)
+
+    return process

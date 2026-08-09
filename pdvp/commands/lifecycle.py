@@ -6,6 +6,7 @@ from pdvp.commands.breakpoints import commit_all
 
 from .. import dap as _dap
 from pdvp import launch
+from ..config import CONFIG
 from ..session import SESSION
 from pdvp.model import Error, Status, StopResult
 from ._internal import (
@@ -54,7 +55,7 @@ def _run(
         prefix_lines.append("killing previous instance")
         _stop_session()
 
-    config = SESSION.config
+    config = CONFIG
     if script is not None:
         config.file = script
         config.args = list(args)
@@ -142,18 +143,10 @@ def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | Non
     if SESSION.client is not None:
         return Error("already connected")
 
-    host = SESSION.config.dap_host
-    port = SESSION.config.port
+    host = CONFIG.dap_host
+    port = CONFIG.port
 
-    client = None
-    for attempt in range(retries):
-        try:
-            client = _dap.Client.connect(host, port)
-            break
-        except OSError as e:
-            if attempt + 1 == retries:
-                return Error(f"could not connect to {host}:{port}: {e}")
-            time.sleep(delay)
+    client = _dap.Client.connect(host, port, CONFIG.connection_timeout, CONFIG.connection_retry)
 
     _check_capabilities(client.initialize())
     client.attach()

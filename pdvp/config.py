@@ -1,9 +1,14 @@
 """The option table: one flat dataclass the user assigns to directly.
 
-    pdvp.config.port = 5678
-    pdvp.config.log_level = "debug"     # normalized to LogLevel at run()
-    del pdvp.config.log_level           # back to its default
-    pdvp.config.reset()                 # all of them back
+    pdvp.CONFIG.port = 5678
+    pdvp.CONFIG.log_level = "debug"     # normalized to LogLevel at run()
+    del pdvp.CONFIG.log_level           # back to its default
+    pdvp.CONFIG.reset()                 # all of them back
+
+CONFIG (bottom of this module) is that one live instance; `pdvp.CONFIG`
+re-exports it, and start_eval() injects it into __main__ as `config`, which is
+what it is called at the prompt. It is *not* named `config` here, because that
+is this module.
 
 Every option is described here and nowhere else. A field optionally carries:
 
@@ -215,6 +220,10 @@ class Config:
     file: str | None = None
     args: list[str] = dataclasses.field(default_factory=list)
 
+    default_server_start_delay: float = 0.3
+    connection_timeout:         float | None = None
+    connection_retry:           int = dataclasses.field(default=1)
+
     def __delattr__(self, name: str) -> None:
         """`del config.port` puts one field back to its default -- the
         counterpart to plain assignment, and the same gesture as
@@ -250,8 +259,8 @@ class Config:
         script named by --file at startup goes too.
 
         Delegates to __delattr__ so "default" has exactly one definition, and
-        mutates in place, so `pdvp.config` and `SESSION.config` keep pointing
-        at this same object.
+        mutates in place, so `pdvp.CONFIG` and every module that imported
+        CONFIG keep pointing at this same object.
         """
         for name in field_table():
             delattr(self, name)
@@ -366,3 +375,5 @@ def default_of(f: dataclasses.Field) -> Any:
     if f.default_factory is not dataclasses.MISSING:
         return f.default_factory()
     return f.default
+
+CONFIG = Config()

@@ -1,7 +1,6 @@
 """Content-Length framed JSON transport for DAP, over a TCP socket."""
-import json
 import socket
-
+import time
 
 class DAPTransport:
     def __init__(self, sock: socket.socket):
@@ -9,8 +8,10 @@ class DAPTransport:
         self._buf = b""
 
     @classmethod
-    def connect(cls, host: str, port: int) -> "DAPTransport":
-        return cls(socket.create_connection((host, port)))
+    def connect(cls, host: str, port: int, timeout: float | None = None, retry: int | None = None) -> "DAPTransport":
+        sock = socket.create_connection((host, port), 1000000000.0)
+        sock.settimeout(None)
+        return cls(sock)
 
     def send(self, message: bytes) -> None:
         print(message.decode("utf-8"))
@@ -19,12 +20,23 @@ class DAPTransport:
 
     def recv(self) -> str:
         header = self._read_header()
+
         length = self._parse_content_length(header)
         body = self._read_exact(length).decode("utf-8")
         print(body)
         return body
 
     def close(self) -> None:
+        try:
+            self._sock.setblocking(False)
+            while self._sock.recv(65536):     # empty the receive queue first
+                pass
+        except (OSError):
+            pass
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)   # now wakes the reader, sends FIN
+        except OSError:
+            pass                                     # ENOTCONN: peer already gone
         self._sock.close()
 
     def _read_header(self) -> bytes:
@@ -38,6 +50,9 @@ class DAPTransport:
         return header
 
     def _read_exact(self, n: int) -> bytes:
+        if n < 0:
+            raise ConnectionError("Negative exact read byte count")
+
         while len(self._buf) < n:
             chunk = self._sock.recv(4096)
             if not chunk:

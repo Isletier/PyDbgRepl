@@ -4,6 +4,8 @@ import pdvp.dap as dap
 import dataclasses
 from pathlib import Path
 
+from pdvp.config import CONFIG
+
 type SourcePath = str
 
 @dataclasses.dataclass
@@ -32,7 +34,7 @@ class SourceMap:
 
         name: str = self._next_temp_name(source.name)
 
-        full_path = Path(SESSION.config.source_catalog) / name
+        full_path = Path(CONFIG.source_catalog) / name
         with open(full_path, "w", encoding="utf-8") as file:
             file.write(responce.body.content)
 

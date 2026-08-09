@@ -9,7 +9,6 @@ import dataclasses
 import threading
 
 from . import launch
-from .options import Config
 
 from . import dap
 from . import model
@@ -19,7 +18,6 @@ from . import source
 @dataclasses.dataclass
 class SessionState:
     # ---- program lifetime: survives run()/stop(), reset by nothing ----
-    config:         Config = dataclasses.field(default_factory=Config)
     Breakpoints:    dict[int, model.Breakpoint] = dataclasses.field(default_factory=dict)
     displays:       list[dict] = dataclasses.field(default_factory=list)
 
