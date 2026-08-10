@@ -52,7 +52,7 @@ class Client:
         self._reader_thread.start()
 
     @classmethod
-    def connect(cls, host: str, port: int, timeout: float | None = None, retry: int | None = None) -> "DAPClient":
+    def connect(cls, host: str, port: int, timeout: float | None = None, retry: int = 1) -> "DAPClient":
         return cls(DAPTransport.connect(host, port, timeout, retry))
 
     def close(self) -> None:

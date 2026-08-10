@@ -1,6 +1,5 @@
 """Content-Length framed JSON transport for DAP, over a TCP socket."""
 import socket
-import time
 
 class DAPTransport:
     def __init__(self, sock: socket.socket):
@@ -8,10 +7,37 @@ class DAPTransport:
         self._buf = b""
 
     @classmethod
-    def connect(cls, host: str, port: int, timeout: float | None = None, retry: int | None = None) -> "DAPTransport":
-        sock = socket.create_connection((host, port), 1000000000.0)
-        sock.settimeout(None)
-        return cls(sock)
+    def connect(cls, host: str, port: int, timeout: float | None = None, retry: int = 1) -> "DAPTransport":
+        """Open a connection, retrying only a connect timeout.
+
+        `retry` is the number of *attempts*, not extra ones: 1 means try once.
+
+        A timeout is the only failure that says nothing about whether anyone
+        is listening -- the SYN may simply have been dropped in transit. Every
+        other OSError is a definite answer (refused: nothing bound; unreachable:
+        no route; EACCES: blocked) and retrying it just multiplies the same
+        rejection, so it propagates from the first attempt.
+
+        No sleep between attempts: a timed-out attempt has already waited
+        `timeout` seconds, which is the backoff.
+
+        `timeout` is seconds, and applies to the *connect* only.
+        create_connection leaves it on the socket it returns, so it would
+        otherwise silently become a read timeout -- and reads here block for
+        as long as the debuggee takes to hit a breakpoint. Hence settimeout(None).
+        """
+        failure: TimeoutError | None = None
+
+        for _ in range(max(retry, 1)):
+            try:
+                sock = socket.create_connection((host, port), timeout)
+            except TimeoutError as e:
+                failure = e
+                continue
+            sock.settimeout(None)
+            return cls(sock)
+
+        raise failure
 
     def send(self, message: bytes) -> None:
         print(message.decode("utf-8"))

@@ -220,7 +220,7 @@ class Config:
     file: str | None = None
     args: list[str] = dataclasses.field(default_factory=list)
 
-    default_server_start_delay: float = 0.3
+    default_server_start_delay: float = 0.1
     connection_timeout:         float | None = None
     connection_retry:           int = dataclasses.field(default=1)
 
