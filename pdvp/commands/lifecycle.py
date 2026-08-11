@@ -1,4 +1,5 @@
 """Session lifecycle: run, stop, connect, disconnect, terminate, restart."""
+import contextlib
 import threading
 import time
 
@@ -70,25 +71,49 @@ def _run(
     if stderr is not None:
         config.stderr = stderr
 
+    if SESSION.client is not None:
+        return Error("already connected")
+
     # The configuration stops being a half-edited draft here: normalize() turns
     # convenience strings into real values and rejects the rest, and
     # spawn_pydevd() owns the pty-vs-redirection conflict.
     try:
         launch.normalize(config)
-        SESSION.process = launch.spawn_pydevd(config)
     except launch.LaunchError as e:
         return Error(str(e))
 
-    prefix_lines.append(f"launched pid={SESSION.process.child.pid}")
+    # Bind before spawning: pydevd takes the address on its command line and
+    # dials back into it, so there is no race to wait out and no port to
+    # guess. closing() covers the paths where we never get a connection --
+    # otherwise each failed run() would leak a bound port and an fd.
+    with contextlib.closing(_dap.listen()) as listener:
+        host, port = listener.getsockname()
 
-    if SESSION.process.master_fd is not None:
-        SESSION.reader_thread = threading.Thread(
-            target=_stream_output, args=(SESSION.process.master_fd,), daemon=True
-        )
-        SESSION.reader_thread.start()
+        try:
+            SESSION.process = launch.spawn_pydevd(config, host, port)
+        except launch.LaunchError as e:
+            return Error(str(e))
 
-    # The pydevd server takes a moment to bind its socket after spawning.
-    return _connect(retries=25, delay=0.2, prefix_lines=prefix_lines)
+        prefix_lines.append(f"launched pid={SESSION.process.child.pid}")
+
+        if SESSION.process.master_fd is not None:
+            SESSION.reader_thread = threading.Thread(
+                target=_stream_output, args=(SESSION.process.master_fd,), daemon=True
+            )
+            SESSION.reader_thread.start()
+
+        try:
+            transport = _dap.Transport.accept(listener, CONFIG.accept_timeout)
+        except TimeoutError:
+            # pydevd exits 1 within milliseconds when it cannot reach us, so
+            # by now the real cause is usually already on the child's status.
+            status = SESSION.process.child.poll()
+            if status is not None:
+                return Error(f"pydevd exited with status {status} without connecting")
+            return Error(f"pydevd did not connect within {CONFIG.accept_timeout}s")
+
+    prefix_lines.append(f"connected to pydevd on {host}:{port}")
+    return _handshake(_dap.Client(transport), prefix_lines)
 
 
 def _stop_session() -> None:
@@ -136,7 +161,9 @@ def _check_capabilities(response) -> None:
         print(f"warning: pydevd reports exception filters {names}, expected {_dap.EXCEPTION_BREAKPOINT_FILTERS}")
 
 
-def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | None = None) -> StopResult | Error:
+def _connect(prefix_lines: list[str] | None = None) -> StopResult | Error:
+    """Dial a pydevd somebody else started. The local case does not come
+    through here -- run() accepts a connection instead of making one."""
     if prefix_lines is None:
         prefix_lines = []
 
@@ -146,8 +173,15 @@ def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | Non
     host = CONFIG.dap_host
     port = CONFIG.port
 
-    client = _dap.Client.connect(host, port, CONFIG.connection_timeout, CONFIG.connection_retry)
+    transport = _dap.Transport.connect(host, port, CONFIG.connection_timeout, CONFIG.connection_retry)
 
+    prefix_lines.append(f"connected to pydevd on {host}:{port}")
+    return _handshake(_dap.Client(transport), prefix_lines)
+
+
+def _handshake(client, prefix_lines: list[str]) -> StopResult | Error:
+    """Everything after the socket exists -- identical whether we dialled or
+    accepted, which is the point of confining the asymmetry to construction."""
     _check_capabilities(client.initialize())
     client.attach()
     client.wait_for_event("initialized", timeout=5)
@@ -158,12 +192,7 @@ def _connect(retries: int = 1, delay: float = 0.2, prefix_lines: list[str] | Non
 
     commit_all()
 
-#    if SESSION.function_breakpoints:
-#        client.set_function_breakpoints(SESSION.function_breakpoints)
-#    client.set_exception_breakpoints(SESSION.exception_filters, [], [])
-
     client.configuration_done()
-    prefix_lines.append(f"connected to pydevd on {host}:{port}")
 
     # configurationDone() resumes the debuggee; block for its first stop
     # (initial breakpoint) or exit, same as cont()/step() etc.

@@ -1,4 +1,4 @@
-"""DAP client: request/response correlation and event dispatch over DAPTransport.
+"""DAP client: request/response correlation and event dispatch over a Transport.
 """
 
 import json
@@ -7,7 +7,7 @@ import threading
 from enum import StrEnum
 from typing import Callable
 
-from .transport import DAPTransport
+from .transport import Transport
 import pdvp.schema.pydevd_schema as schema
 import pdvp.schema.pydevd_base_schema as base_schema
 
@@ -34,7 +34,17 @@ class event_name(StrEnum):
     MEMORY          = "memory"
 
 class Client:
-    def __init__(self, transport: DAPTransport):
+    def __init__(self, transport: Transport):
+        """Take over an already-connected `transport`.
+
+        Construct the transport yourself -- Transport.connect() for a remote
+        pydevd, Transport.accept() for one we spawned.
+
+        Ownership transfers: Client.close() closes the transport, so don't
+        close it yourself. The one exception is if this raises, since then
+        the caller is the only one still holding it.
+
+        """
         self._transport = transport
 
         self._seq = 0
@@ -50,10 +60,6 @@ class Client:
 
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._reader_thread.start()
-
-    @classmethod
-    def connect(cls, host: str, port: int, timeout: float | None = None, retry: int = 1) -> "DAPClient":
-        return cls(DAPTransport.connect(host, port, timeout, retry))
 
     def close(self) -> None:
         if self.on_disconnect is not None:

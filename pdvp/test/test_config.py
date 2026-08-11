@@ -16,6 +16,16 @@ from .. import config as _config
 from ..config import CONFIG, Config, LaunchError, LogLevel, QtSupport, VmType
 
 
+# The address pydevd is told to dial back into. Not a config field: run()
+# binds its own socket and passes the resolved address down, so these are
+# stand-ins for whatever the kernel handed us.
+_HOST, _PORT = "127.0.0.1", 45678
+
+
+def _argv(config: Config) -> list[str]:
+    return launch.build_spawn_argv(config, _HOST, _PORT)
+
+
 def _expect_error(fn, needle: str) -> None:
     try:
         fn()
@@ -128,8 +138,10 @@ def test_parse_batch_inverts_interactive() -> None:
 
 def test_parse_rejects_bad_input() -> None:
     _expect_error(lambda: launch.parse_argv(Config(), ["--nope"]), "unknown flag")
+    # Both modes are ours to pick, not the user's: we spawn pydevd in --client
+    # mode so it dials back into a socket we bound first.
     _expect_error(lambda: launch.parse_argv(Config(), ["--client", "h"]), "not supported")
-    _expect_error(lambda: launch.parse_argv(Config(), ["--server"]), "enabled by default")
+    _expect_error(lambda: launch.parse_argv(Config(), ["--server"]), "not supported")
     _expect_error(lambda: launch.parse_argv(Config(), ["--port"]), "expected parameter value")
     _expect_error(lambda: launch.parse_argv(Config(), ["--module=1"]), "takes no value")
     _expect_error(lambda: launch.parse_argv(Config(), ["--file"]), "expected parameter value")
@@ -142,7 +154,7 @@ def test_log_level_emits_pydevds_integer() -> None:
     # inferior before it starts.
     c = Config()
     c.log_level = LogLevel.DEBUG
-    argv = launch.build_spawn_argv(c)
+    argv = _argv(c)
     assert "--log-level" in argv
     assert argv[argv.index("--log-level") + 1] == "2", argv
 
@@ -152,13 +164,13 @@ def test_qt_support_emits_one_joined_token() -> None:
     # mode as an unknown option.
     c = Config()
     c.qt_support = QtSupport.PYQT5
-    argv = launch.build_spawn_argv(c)
+    argv = _argv(c)
     assert "--qt-support=pyqt5" in argv, argv
     assert "--qt-support" not in argv, argv
 
 
 def test_defaults_are_not_emitted() -> None:
-    argv = launch.build_spawn_argv(Config())
+    argv = _argv(Config())
     for flag in ("--log-level", "--qt-support", "--module", "--preimport", "--file"):
         assert not any(a.startswith(flag) for a in argv), (flag, argv)
 
@@ -167,7 +179,7 @@ def test_file_is_last_flag_and_args_follow() -> None:
     c = Config()
     c.file = "s.py"
     c.args = ["--foo", "1"]
-    argv = launch.build_spawn_argv(c)
+    argv = _argv(c)
     assert argv[-4:] == ["--file", "s.py", "--foo", "1"], argv
 
 
@@ -178,7 +190,6 @@ def test_every_spawn_field_reaches_the_argv() -> None:
     forgotten in the emitter, which is how the --log-level and --qt-support
     bugs survived."""
     samples = {
-        "port": 5678,
         "ppid": 99,
         "preimport": "mymod",
         "log_file": "/tmp/x.log",
@@ -196,7 +207,7 @@ def test_every_spawn_field_reaches_the_argv() -> None:
 
         c = Config()
         setattr(c, f.name, samples[f.name])
-        argv = launch.build_spawn_argv(c)
+        argv = _argv(c)
         assert any(a.split("=")[0] == spec.spawn for a in argv), (f.name, argv)
 
 
@@ -212,14 +223,36 @@ def test_parse_emit_round_trip() -> None:
 
     # Re-parsing what we emit must land on the same configuration, so the two
     # halves of the table cannot drift apart.
-    emitted = launch.build_spawn_argv(first)
+    emitted = _argv(first)
+    fixed = len(["python", "-m", "pydevd"]) + len(launch.OBLIGATORY_RUN_ARGUMENTS) + len(["--client", _HOST, "--port", str(_PORT)])
     second = Config()
-    launch.parse_argv(second, emitted[len(["python", "-m", "pydevd"]) + len(launch.OBLIGATORY_RUN_ARGUMENTS):])
+    launch.parse_argv(second, emitted[fixed:])
 
     for f in dataclasses.fields(Config):
-        if f.name in ("vm_type",):  # not emitted: it selects the executable
+        # vm_type selects the executable rather than being emitted; port is
+        # the address connect() dials, and the one in the spawn argv belongs
+        # to the listener we bound, so neither round-trips through the table.
+        if f.name in ("vm_type", "port"):
             continue
         assert getattr(first, f.name) == getattr(second, f.name), f.name
+
+
+def test_pydevd_is_always_told_to_dial_back() -> None:
+    """--client is what removes the startup race: pydevd connects to a socket
+    we bound before spawning it, rather than binding one of its own."""
+    argv = _argv(Config())
+    assert argv[argv.index("--client") + 1] == _HOST, argv
+    assert argv[argv.index("--port") + 1] == str(_PORT), argv
+    assert "--server" not in argv, argv
+
+
+def test_config_port_never_reaches_the_spawn_argv() -> None:
+    """`config.port` is the remote dial target for connect(). A local run
+    binds its own socket, so a stale value must not leak into the child."""
+    c = Config()
+    c.port = 9999
+    argv = _argv(c)
+    assert "9999" not in argv, argv
 
 
 # ---- restoring defaults ----
@@ -244,17 +277,14 @@ def test_del_never_leaves_a_field_missing() -> None:
 
 
 def test_del_reruns_the_default_factory() -> None:
+    """A factory default is re-evaluated rather than shared, so `del` hands
+    back a fresh object and not the one some other Config is holding."""
     config = Config()
-    started_on = config.port
-    config.port = 5678
+    config.args = ["--foo"]
 
-    del config.port
-    assert config.port != 5678
-    assert 20000 <= config.port <= 65000
-    # A factory default is re-evaluated, so this is a fresh draw rather than
-    # the port the config was built with. Documented, not a bug.
     del config.args
-    assert config.args == [] and config.args is not Config().args
+    assert config.args == []
+    assert config.args is not Config().args
 
 
 def test_del_unknown_name_raises() -> None:
@@ -316,6 +346,8 @@ TESTS = [
     test_file_is_last_flag_and_args_follow,
     test_every_spawn_field_reaches_the_argv,
     test_parse_emit_round_trip,
+    test_pydevd_is_always_told_to_dial_back,
+    test_config_port_never_reaches_the_spawn_argv,
     test_del_restores_one_field,
     test_del_never_leaves_a_field_missing,
     test_del_reruns_the_default_factory,

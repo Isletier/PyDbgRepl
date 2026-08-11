@@ -1,12 +1,12 @@
 """End-to-end tests for the v1 DAP client against real pydevd instances.
 
-No test framework dependency: each test_* function takes a port, raises
+No test framework dependency: each test_* function takes no arguments, raises
 AssertionError on failure, and the __main__ runner reports pass/fail for all
 of them.
 
 Run from the repo root with the venv active:
 
-    python -m src.dap.test.test_dap_client
+    python -m pdvp.dap.test.test_dap_client
 """
 import os
 
@@ -18,8 +18,8 @@ CALC = os.path.join(TARGETS, "calc.py")
 LOOP = os.path.join(TARGETS, "loop.py")
 
 
-def test_session_lifecycle(port: int) -> None:
-    with session(port, LOOP) as client:
+def test_session_lifecycle() -> None:
+    with session(LOOP) as client:
         attach_and_configure(client)
 
         threads = client.threads()
@@ -28,8 +28,8 @@ def test_session_lifecycle(port: int) -> None:
         client.disconnect(terminate_debuggee=True)
 
 
-def test_line_breakpoint_and_inspection(port: int) -> None:
-    with session(port, CALC) as client:
+def test_line_breakpoint_and_inspection() -> None:
+    with session(CALC) as client:
         attach_and_configure(client, breakpoints={CALC: [{"line": 2}]})  # `c = a + b` in inner()
 
         stopped = client.wait_for_event("stopped", timeout=10)
@@ -62,8 +62,8 @@ def test_line_breakpoint_and_inspection(port: int) -> None:
         client.continue_(thread_id)
 
 
-def test_step_commands(port: int) -> None:
-    with session(port, CALC) as client:
+def test_step_commands() -> None:
+    with session(CALC) as client:
         attach_and_configure(client, breakpoints={CALC: [{"line": 9}]})  # `z = inner(x, y)` in outer()
 
         stopped = client.wait_for_event("stopped", timeout=10)
@@ -91,8 +91,8 @@ def test_step_commands(port: int) -> None:
         client.continue_(thread_id)
 
 
-def test_function_breakpoints(port: int) -> None:
-    with session(port, CALC) as client:
+def test_function_breakpoints() -> None:
+    with session(CALC) as client:
         client.initialize()
         client.attach()
         client.wait_for_event("initialized", timeout=5)
@@ -111,8 +111,8 @@ def test_function_breakpoints(port: int) -> None:
         client.continue_(thread_id)
 
 
-def test_exception_breakpoints_and_info(port: int) -> None:
-    with session(port, CALC) as client:
+def test_exception_breakpoints_and_info() -> None:
+    with session(CALC) as client:
         attach_and_configure(client, exception_filters=["raised"])
 
         stopped = client.wait_for_event("stopped", timeout=10)
@@ -126,8 +126,8 @@ def test_exception_breakpoints_and_info(port: int) -> None:
         client.continue_(thread_id)
 
 
-def test_pause(port: int) -> None:
-    with session(port, LOOP) as client:
+def test_pause() -> None:
+    with session(LOOP) as client:
         attach_and_configure(client)
 
         threads = client.threads()["threads"]
@@ -140,8 +140,8 @@ def test_pause(port: int) -> None:
         client.continue_(thread_id)
 
 
-def test_pydevd_system_info(port: int) -> None:
-    with session(port, LOOP) as client:
+def test_pydevd_system_info() -> None:
+    with session(LOOP) as client:
         attach_and_configure(client)
 
         info = client.pydevd_system_info()
@@ -150,8 +150,8 @@ def test_pydevd_system_info(port: int) -> None:
         client.disconnect(terminate_debuggee=True)
 
 
-def test_pydevd_authorize(port: int) -> None:
-    with session(port, LOOP) as client:
+def test_pydevd_authorize() -> None:
+    with session(LOOP) as client:
         attach_and_configure(client)
 
         info = client.pydevd_authorize()
@@ -160,8 +160,8 @@ def test_pydevd_authorize(port: int) -> None:
         client.disconnect(terminate_debuggee=True)
 
 
-def test_modules(port: int) -> None:
-    with session(port, LOOP) as client:
+def test_modules() -> None:
+    with session(LOOP) as client:
         attach_and_configure(client)
 
         modules = client.modules()
@@ -170,8 +170,8 @@ def test_modules(port: int) -> None:
         client.disconnect(terminate_debuggee=True)
 
 
-def test_set_debugger_property(port: int) -> None:
-    with session(port, LOOP) as client:
+def test_set_debugger_property() -> None:
+    with session(LOOP) as client:
         attach_and_configure(client)
 
         result = client.set_debugger_property(multiThreadsSingleNotification=True)
@@ -180,8 +180,8 @@ def test_set_debugger_property(port: int) -> None:
         client.disconnect(terminate_debuggee=True)
 
 
-def test_set_pydevd_source_map(port: int) -> None:
-    with session(port, CALC) as client:
+def test_set_pydevd_source_map() -> None:
+    with session(CALC) as client:
         attach_and_configure(client)
 
         result = client.set_pydevd_source_map({"path": CALC}, [])
@@ -190,8 +190,8 @@ def test_set_pydevd_source_map(port: int) -> None:
         client.disconnect(terminate_debuggee=True)
 
 
-def test_source_invalid_reference(port: int) -> None:
-    with session(port, LOOP) as client:
+def test_source_invalid_reference() -> None:
+    with session(LOOP) as client:
         attach_and_configure(client)
 
         try:
@@ -204,8 +204,8 @@ def test_source_invalid_reference(port: int) -> None:
         client.disconnect(terminate_debuggee=True)
 
 
-def test_completions(port: int) -> None:
-    with session(port, CALC) as client:
+def test_completions() -> None:
+    with session(CALC) as client:
         attach_and_configure(client, breakpoints={CALC: [{"line": 2}]})  # `c = a + b` in inner()
 
         stopped = client.wait_for_event("stopped", timeout=10)
@@ -219,8 +219,8 @@ def test_completions(port: int) -> None:
         client.continue_(thread_id)
 
 
-def test_step_in_targets(port: int) -> None:
-    with session(port, CALC) as client:
+def test_step_in_targets() -> None:
+    with session(CALC) as client:
         attach_and_configure(client, breakpoints={CALC: [{"line": 9}]})  # `z = inner(x, y)` in outer()
 
         stopped = client.wait_for_event("stopped", timeout=10)
@@ -233,8 +233,8 @@ def test_step_in_targets(port: int) -> None:
         client.continue_(thread_id)
 
 
-def test_goto(port: int) -> None:
-    with session(port, CALC) as client:
+def test_goto() -> None:
+    with session(CALC) as client:
         attach_and_configure(client, breakpoints={CALC: [{"line": 9}]})  # `z = inner(x, y)` in outer()
 
         stopped = client.wait_for_event("stopped", timeout=10)
@@ -270,13 +270,11 @@ TESTS = [
 
 
 def main() -> None:
-    base_port = 17000
     failures = []
-    for i, test in enumerate(TESTS):
-        port = base_port + i
-        print(f"{test.__name__} (port {port}) ... ", end="", flush=True)
+    for test in TESTS:
+        print(f"{test.__name__} ... ", end="", flush=True)
         try:
-            test(port)
+            test()
         except Exception as e:
             print(f"FAIL: {e!r}")
             failures.append(test.__name__)

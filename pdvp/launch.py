@@ -3,7 +3,6 @@ import dataclasses
 import os
 import pty
 import subprocess
-import time
 
 # Aliased: spawn_pydevd()/build_spawn_argv() take a parameter called `config`,
 # which would otherwise shadow the module.
@@ -18,12 +17,16 @@ from .config import (  # re-exported: callers say launch.LaunchError, launch.VmT
 )
 
 OBLIGATORY_RUN_ARGUMENTS = [
-    "--server",
     "--json-dap-http",
     "--skip-notify-stdin",
 ]
 
 SANITIZE_RUN_ARGUMENTS = [
+    # We spawn pydevd in --client mode so that it dials back into a socket we
+    # bound before it existed: that removes the startup race, and the port
+    # comes from the kernel instead of a guess. --server is the mode we
+    # replaced, and --client is ours to set, not the user's.
+    "--server",
     "--client",
     "--cmd-line",
     "--access-token",
@@ -135,10 +138,19 @@ def _emit(spec: _config.OptSpec, value, default) -> list[str]:
     return [spec.spawn, wire]
 
 
-def build_spawn_argv(config: Config) -> list[str]:
+def build_spawn_argv(config: Config, host: str, port: int) -> list[str]:
+    """pydevd's argv, told to dial back into `host:port`.
+
+    The address is a parameter rather than a config field on purpose: it is
+    the address of a socket the caller has already bound, so it cannot exist
+    before the listener does. Taking it here makes that ordering a matter of
+    the signature instead of a comment -- there is no port to pass until
+    dap.listen() has produced one.
+    """
     vm_type = config.vm_type or VmType.PYTHON
     argv = [vm_type.value, "-m", "pydevd"]
     argv.extend(OBLIGATORY_RUN_ARGUMENTS)
+    argv += ["--client", host, "--port", str(port)]
 
     for f in dataclasses.fields(config):
         spec = _config.spec_of(f)
@@ -169,9 +181,17 @@ class LaunchedProcess:
     stdin_is_pty: bool = False
 
 
-def spawn_pydevd(config: Config) -> LaunchedProcess:
-    """Start pydevd against `config`. The child inherits our os.environ."""
-    spawn_argv = build_spawn_argv(config)
+def spawn_pydevd(config: Config, host: str, port: int) -> LaunchedProcess:
+    """Start pydevd against `config`; it dials back into `host:port`.
+
+    Returns as soon as the child exists -- there is nothing to wait for here.
+    The caller already holds the listening socket, so accept() is the wait,
+    and pydevd blocks before running the target until that connection is
+    established (pydevd.py: `debugger.connect(...)` precedes `debugger.run`).
+
+    The child inherits our os.environ.
+    """
+    spawn_argv = build_spawn_argv(config, host, port)
 
     redirected = config.stdin is not None or config.stdout is not None or config.stderr is not None
 
@@ -234,7 +254,5 @@ def spawn_pydevd(config: Config) -> LaunchedProcess:
             os.close(fd)
 
     process = LaunchedProcess(child=child, master_fd=master_fd, stdin_is_pty=config.stdin is None)
-
-    time.sleep(config.default_server_start_delay)
 
     return process

@@ -1,5 +1,6 @@
 """Minimal DAP client for talking to pydevd's --json-dap-http server."""
 from .client import Client, DAPError, event_name
+from .transport import LISTEN_HOST, Transport, listen
 
 from pdvp.schema.pydevd_schema import (
     Breakpoint,
@@ -46,6 +47,9 @@ EXCEPTION_BREAKPOINT_FILTERS = ["raised", "uncaught", "userUnhandled"]
 
 __all__ = [
     "Client",
+    "Transport",
+    "listen",
+    "LISTEN_HOST",
     "DAPError",
     "event_name",
     "EXCEPTION_BREAKPOINT_FILTERS",

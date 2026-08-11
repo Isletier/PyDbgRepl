@@ -1,4 +1,4 @@
-"""Tests for DAPTransport.connect: the retry policy and the connect timeout.
+"""Tests for Transport construction: connect retry policy, timeouts, accept.
 
 No test framework dependency: each test_* function takes no arguments, raises
 AssertionError on failure, and the __main__ runner reports pass/fail for all
@@ -17,9 +17,10 @@ Two layers, because they answer different questions:
 """
 import contextlib
 import socket
+import threading
 import time
 
-from ..transport import DAPTransport
+from ..transport import LISTEN_HOST, Transport, listen
 
 # How many connections we are willing to open while filling a listener's
 # accept queue before giving up on saturating it.
@@ -79,13 +80,13 @@ def _stub_connect(*outcomes):
 
 def test_succeeds_without_retrying_when_the_first_attempt_works() -> None:
     with _stub_connect("ok") as fake:
-        DAPTransport.connect("127.0.0.1", 1234, timeout=0.1, retry=5)
+        Transport.connect("127.0.0.1", 1234, timeout=0.1, retry=5)
     assert fake.calls == 1, fake.calls
 
 
 def test_retries_a_timeout_until_one_attempt_succeeds() -> None:
     with _stub_connect(TimeoutError(), TimeoutError(), "ok") as fake:
-        DAPTransport.connect("127.0.0.1", 1234, timeout=0.1, retry=5)
+        Transport.connect("127.0.0.1", 1234, timeout=0.1, retry=5)
     # Stops as soon as it works: 3 attempts, not the full 5.
     assert fake.calls == 3, fake.calls
 
@@ -94,7 +95,7 @@ def test_retry_counts_attempts_not_extra_attempts() -> None:
     """`retry=3` means three connections are attempted in total."""
     with _stub_connect(TimeoutError()) as fake:
         try:
-            DAPTransport.connect("127.0.0.1", 1234, timeout=0.1, retry=3)
+            Transport.connect("127.0.0.1", 1234, timeout=0.1, retry=3)
         except TimeoutError:
             pass
         else:
@@ -105,7 +106,7 @@ def test_retry_counts_attempts_not_extra_attempts() -> None:
 def test_retry_of_zero_or_one_still_attempts_once() -> None:
     for retry in (0, 1):
         with _stub_connect("ok") as fake:
-            DAPTransport.connect("127.0.0.1", 1234, retry=retry)
+            Transport.connect("127.0.0.1", 1234, retry=retry)
         assert fake.calls == 1, (retry, fake.calls)
 
 
@@ -115,7 +116,7 @@ def test_refused_is_not_retried() -> None:
     collects the same rejection `retry` times."""
     with _stub_connect(ConnectionRefusedError(111, "Connection refused")) as fake:
         try:
-            DAPTransport.connect("127.0.0.1", 1234, timeout=0.1, retry=5)
+            Transport.connect("127.0.0.1", 1234, timeout=0.1, retry=5)
         except ConnectionRefusedError:
             pass
         else:
@@ -129,7 +130,7 @@ def test_other_oserrors_are_not_retried_either() -> None:
                   socket.gaierror(-2, "Name or service not known")):
         with _stub_connect(error) as fake:
             try:
-                DAPTransport.connect("nowhere", 1234, timeout=0.1, retry=5)
+                Transport.connect("nowhere", 1234, timeout=0.1, retry=5)
             except OSError as e:
                 assert e is error, e
             else:
@@ -140,7 +141,7 @@ def test_other_oserrors_are_not_retried_either() -> None:
 def test_the_timeout_is_passed_to_every_attempt() -> None:
     with _stub_connect(TimeoutError()) as fake:
         try:
-            DAPTransport.connect("127.0.0.1", 1234, timeout=0.25, retry=3)
+            Transport.connect("127.0.0.1", 1234, timeout=0.25, retry=3)
         except TimeoutError:
             pass
     assert fake.timeouts_seen == [0.25, 0.25, 0.25], fake.timeouts_seen
@@ -151,7 +152,7 @@ def test_connect_timeout_does_not_become_a_read_timeout() -> None:
     here block until the debuggee next stops, which is unbounded, so connect()
     must clear it."""
     with _stub_connect("ok"):
-        transport = DAPTransport.connect("127.0.0.1", 1234, timeout=0.25)
+        transport = Transport.connect("127.0.0.1", 1234, timeout=0.25)
     assert transport._sock.gettimeout() is None, transport._sock.gettimeout()
 
 
@@ -220,7 +221,7 @@ def test_closed_port_is_refused_rather_than_timing_out() -> None:
     with _closed_port() as (host, port):
         started = time.monotonic()
         try:
-            DAPTransport.connect(host, port, timeout=5.0, retry=1)
+            Transport.connect(host, port, timeout=5.0, retry=1)
         except ConnectionRefusedError:
             pass
         else:
@@ -238,7 +239,7 @@ def test_real_connect_times_out_and_retries_each_attempt() -> None:
     with _blackhole_port() as (host, port):
         started = time.monotonic()
         try:
-            DAPTransport.connect(host, port, timeout=timeout, retry=attempts)
+            Transport.connect(host, port, timeout=timeout, retry=attempts)
         except TimeoutError:
             pass
         else:
@@ -252,6 +253,104 @@ def test_real_connect_times_out_and_retries_each_attempt() -> None:
     assert elapsed < attempts * timeout + 1.0, elapsed
 
 
+# ---- listen() / Transport.accept() ----
+
+def test_listen_binds_a_kernel_chosen_loopback_port() -> None:
+    with contextlib.closing(listen()) as listener:
+        host, port = listener.getsockname()
+        assert host == LISTEN_HOST, host
+        assert port != 0, port
+
+
+def test_listen_honours_an_explicit_port() -> None:
+    with contextlib.closing(listen()) as first:
+        wanted = first.getsockname()[1]
+    with contextlib.closing(listen(wanted)) as second:
+        assert second.getsockname()[1] == wanted
+
+
+def test_accept_times_out_when_nobody_dials() -> None:
+    """The case that guards a failed spawn: pydevd exits within milliseconds
+    when it cannot reach us, and without a timeout this would hang forever
+    with no reader thread yet running to notice."""
+    with contextlib.closing(listen()) as listener:
+        started = time.monotonic()
+        try:
+            Transport.accept(listener, timeout=0.25)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("expected TimeoutError with nobody connecting")
+        elapsed = time.monotonic() - started
+
+    assert 0.2 <= elapsed < 1.5, elapsed
+
+
+def test_accept_leaves_the_listener_open_on_both_paths() -> None:
+    """accept() does not own the listener -- the caller closes it, including
+    when accept() raises, which is the path that would otherwise leak a bound
+    port and an fd per failed run()."""
+    with contextlib.closing(listen()) as listener:
+        try:
+            Transport.accept(listener, timeout=0.1)
+        except TimeoutError:
+            pass
+        assert listener.fileno() != -1, "listener closed on the raise path"
+
+        with contextlib.closing(_dial(listener.getsockname())):
+            transport = Transport.accept(listener, timeout=2.0)
+        assert listener.fileno() != -1, "listener closed on the success path"
+        transport.close()
+
+
+def test_accepted_socket_has_no_read_timeout() -> None:
+    """CPython's accept() only forces blocking when the process-wide default
+    timeout is None, and we always set one on the listener to bound the wait.
+    Reads block until the debuggee next stops, which is unbounded."""
+    socket.setdefaulttimeout(0.5)   # what any REPL-imported library could do
+    try:
+        with contextlib.closing(listen()) as listener:
+            with contextlib.closing(_dial(listener.getsockname())):
+                transport = Transport.accept(listener, timeout=2.0)
+        assert transport._sock.gettimeout() is None, transport._sock.gettimeout()
+        transport.close()
+    finally:
+        socket.setdefaulttimeout(None)
+
+
+def test_accepted_and_dialled_transports_behave_identically() -> None:
+    """The executable form of "the asymmetry stops at construction": both
+    constructors yield a transport that frames and reads the same way."""
+    with contextlib.closing(listen()) as listener:
+        address = listener.getsockname()
+
+        far_end: list = []
+        dialler = threading.Thread(
+            target=lambda: far_end.append(Transport.connect(*address, timeout=2.0)),
+            daemon=True)
+        dialler.start()
+
+        accepted = Transport.accept(listener, timeout=2.0)
+        dialler.join(timeout=2.0)
+
+    dialled = far_end[0]
+    try:
+        accepted.send(b'{"seq":1,"type":"request","command":"initialize"}')
+        assert dialled.recv() == '{"seq":1,"type":"request","command":"initialize"}'
+
+        dialled.send(b'{"seq":1,"type":"response","success":true}')
+        assert accepted.recv() == '{"seq":1,"type":"response","success":true}'
+    finally:
+        accepted.close()
+        dialled.close()
+
+
+def _dial(address):
+    """A bare socket connected to `address`, for tests that need something on
+    the far end without caring what it is."""
+    return socket.create_connection(address, 2.0)
+
+
 TESTS = [
     test_succeeds_without_retrying_when_the_first_attempt_works,
     test_retries_a_timeout_until_one_attempt_succeeds,
@@ -263,6 +362,12 @@ TESTS = [
     test_connect_timeout_does_not_become_a_read_timeout,
     test_closed_port_is_refused_rather_than_timing_out,
     test_real_connect_times_out_and_retries_each_attempt,
+    test_listen_binds_a_kernel_chosen_loopback_port,
+    test_listen_honours_an_explicit_port,
+    test_accept_times_out_when_nobody_dials,
+    test_accept_leaves_the_listener_open_on_both_paths,
+    test_accepted_socket_has_no_read_timeout,
+    test_accepted_and_dialled_transports_behave_identically,
 ]
 
 

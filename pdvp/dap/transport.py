@@ -1,30 +1,74 @@
-"""Content-Length framed JSON transport for DAP, over a TCP socket."""
+"""Content-Length framed JSON transport for DAP, over a TCP socket.
+
+There are two ways to end up with one, and they differ only in how the socket
+is obtained:
+
+  Transport.connect()  we dial a pydevd that is already listening (remote).
+  Transport.accept()   a pydevd we spawned with --client dials us (local).
+
+Everything past construction -- send, recv, close, and the reader thread above
+it -- is identical, and nothing downstream can tell which happened.
+"""
 import socket
 
-class DAPTransport:
+# We only ever listen on loopback: anything that can reach this socket can
+# drive the debugger, and the process dialling in is one we just spawned.
+LISTEN_HOST = "127.0.0.1"
+
+
+def listen(port: int = 0) -> socket.socket:
+    """Bind and listen for a pydevd we are about to spawn with --client.
+
+    Separate from Transport.accept() because of an ordering constraint:
+    pydevd takes the port on its command line, so the socket has to be bound
+    *before* the spawn and can only be accepted *after* it.
+
+    Port 0 asks the kernel for a free one, which is why nothing here has to
+    guess a port or handle a collision; the resolved address is
+    sock.getsockname().
+
+    The caller owns the returned socket and must close it -- including when
+    the spawn fails or accept() raises, which is the path that would
+    otherwise leak a bound port and an fd per attempt.
+    """
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((LISTEN_HOST, port))
+    sock.listen(1)
+    return sock
+
+
+class Transport:
     def __init__(self, sock: socket.socket):
         self._sock = sock
         self._buf = b""
 
     @classmethod
-    def connect(cls, host: str, port: int, timeout: float | None = None, retry: int = 1) -> "DAPTransport":
-        """Open a connection, retrying only a connect timeout.
+    def accept(cls, listener: socket.socket, timeout: float | None = None) -> "Transport":
+        """Take the connection from a pydevd we spawned with --client.
+
+        `timeout` bounds the wait: pydevd exits 1 within milliseconds if it
+        cannot reach us, so without one a failed spawn would hang here
+        forever with no reader thread yet running to notice.
+
+        Does not close `listener` -- the caller owns it, and still has to
+        close it when this raises.
+        """
+        listener.settimeout(timeout)
+        sock, _peer = listener.accept()
+
+        # accept() only forces the new socket blocking when the process-wide
+        # default timeout is None (CPython issue #7995), and anything the
+        # user imports at the REPL can call socket.setdefaulttimeout(). Reads
+        # here block until the debuggee next stops, which is unbounded.
+        sock.settimeout(None)
+        return cls(sock)
+
+    @classmethod
+    def connect(cls, host: str, port: int, timeout: float | None = None, retry: int = 1) -> "Transport":
+        """Dial a pydevd that is already listening, retrying only a timeout.
 
         `retry` is the number of *attempts*, not extra ones: 1 means try once.
-
-        A timeout is the only failure that says nothing about whether anyone
-        is listening -- the SYN may simply have been dropped in transit. Every
-        other OSError is a definite answer (refused: nothing bound; unreachable:
-        no route; EACCES: blocked) and retrying it just multiplies the same
-        rejection, so it propagates from the first attempt.
-
-        No sleep between attempts: a timed-out attempt has already waited
-        `timeout` seconds, which is the backoff.
-
-        `timeout` is seconds, and applies to the *connect* only.
-        create_connection leaves it on the socket it returns, so it would
-        otherwise silently become a read timeout -- and reads here block for
-        as long as the debuggee takes to hit a breakpoint. Hence settimeout(None).
         """
         failure: TimeoutError | None = None
 

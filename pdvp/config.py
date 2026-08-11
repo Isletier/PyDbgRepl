@@ -27,7 +27,6 @@ import dataclasses
 import enum
 import functools
 import os
-import random
 import tempfile
 import types
 import typing
@@ -37,10 +36,6 @@ from typing import Any, Callable
 class LaunchError(Exception):
     """A configuration value we can't use: wrong type, unknown value, or two
     settings that contradict each other."""
-
-
-def _random_port() -> int:
-    return random.randint(20000, 65000)
 
 
 # ---- value domains ----
@@ -145,9 +140,13 @@ class Config:
     otherwise lose against the old set()/get() pair."""
 
     # -- pydevd launch --
+    # The port connect() dials on a remote pydevd. Not used by run(): that
+    # binds its own socket and lets the kernel pick, so there is no port to
+    # guess and no collision to handle. Emitted by neither -- run() passes the
+    # resolved port to build_spawn_argv() explicitly.
     port: int = dataclasses.field(
-        default_factory=_random_port,
-        metadata=opt(cli="--port", spawn="--port", emit=Emit.ALWAYS))
+        default=0,
+        metadata=opt(cli="--port"))
     ppid: int = dataclasses.field(
         default=0,
         metadata=opt(cli="--ppid", spawn="--ppid", emit=Emit.ALWAYS))
@@ -203,6 +202,9 @@ class Config:
     stdout: str | None = None
     stderr: str | None = None
 
+    # The host connect() dials. Like `port`, remote-only: run() always listens
+    # on loopback (dap.LISTEN_HOST), which is not negotiable -- anything that
+    # can reach that socket can drive the debugger.
     dap_host: str = "127.0.0.1"
     # REPL frontend: "auto" (ptpython if installed, else plain readline),
     # "ptpython", or "readline".
@@ -220,7 +222,16 @@ class Config:
     file: str | None = None
     args: list[str] = dataclasses.field(default_factory=list)
 
-    default_server_start_delay: float = 0.1
+    # -- establishing the DAP connection --
+    # The local case is not configurable: run() binds its own socket, lets the
+    # kernel pick the port, and pydevd dials back into it (--client), so there
+    # is no address, no port and no retry to tune. Only the wait has a number,
+    # because a spawn that fails must not hang forever -- pydevd exits within
+    # milliseconds when it cannot reach us, and the connect itself takes ~90ms.
+    accept_timeout:             float = 1.0
+    # These two are the remote case only: connect() dials a pydevd somebody
+    # else started, where the address is unknown to us and a dropped SYN is a
+    # real possibility.
     connection_timeout:         float | None = None
     connection_retry:           int = dataclasses.field(default=1)
 
@@ -234,9 +245,9 @@ class Config:
         re-apply the declared default instead, so "every field always has a
         value" holds for every reader.
 
-        The default is whatever the field declares -- `del config.port` runs
-        `_random_port()` again and so hands back a *fresh* port, not the one
-        this session started on.
+        The default is whatever the field declares, and a default_factory is
+        re-run rather than shared -- `del config.args` hands back a fresh
+        list, not the one some other Config is holding.
         """
         f = field_table().get(name)
         if f is None:

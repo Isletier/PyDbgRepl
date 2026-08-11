@@ -1,45 +1,45 @@
 """Shared helpers for DAP client tests that spawn a real pydevd instance."""
 import contextlib
 import os
-import time
 
 from ... import launch
 from ..client import Client
+from ..transport import Transport, listen
 
-CONNECT_TIMEOUT = 10.0
-CONNECT_RETRY_INTERVAL = 0.1
-STARTUP_DELAY = 1.5
+# Generous next to the ~90ms a real connect takes, but this is a test harness
+# under load, and the failure it guards against (pydevd never dials) is
+# already reported by the child's exit status.
+ACCEPT_TIMEOUT = 10.0
 
 
 @contextlib.contextmanager
-def session(port: int, target_path: str, *args: str):
-    """Spawn pydevd against `target_path` and yield a connected DAPClient.
+def session(target_path: str, *args: str):
+    """Spawn pydevd against `target_path` and yield a connected Client.
+
+    No port argument and no retry loop: we bind first and let the kernel pick
+    the port, then pydevd dials back into it, so concurrent sessions cannot
+    collide and there is no startup race to wait out.
 
     The caller is responsible for the initialize/attach/configurationDone
     handshake (order and breakpoint setup varies per test).
     """
     config = launch.Config()
-    config.port = port
     config.file = target_path
     config.args = list(args)
 
-    proc = launch.spawn_pydevd(config)
+    with contextlib.closing(listen()) as listener:
+        host, port = listener.getsockname()
+        proc = launch.spawn_pydevd(config, host, port)
+        try:
+            client = Client(Transport.accept(listener, ACCEPT_TIMEOUT))
+        except TimeoutError:
+            proc.child.kill()
+            proc.child.wait()
+            raise RuntimeError(
+                f"pydevd never dialled {host}:{port} "
+                f"(exit status {proc.child.returncode})")
+
     try:
-        time.sleep(STARTUP_DELAY)
-
-        deadline = time.monotonic() + CONNECT_TIMEOUT
-        client = None
-        last_error = None
-        while time.monotonic() < deadline:
-            try:
-                client = Client.connect("127.0.0.1", port)
-                break
-            except OSError as e:
-                last_error = e
-                time.sleep(CONNECT_RETRY_INTERVAL)
-        if client is None:
-            raise RuntimeError(f"could not connect to pydevd on port {port}: {last_error}")
-
         try:
             yield client
         finally:
