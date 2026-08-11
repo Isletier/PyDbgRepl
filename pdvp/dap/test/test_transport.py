@@ -20,7 +20,14 @@ import socket
 import threading
 import time
 
-from ..transport import LISTEN_HOST, Transport, listen
+from ..transport import (
+    LISTEN_HOST,
+    MAX_BODY_SIZE,
+    MAX_HEADER_SIZE,
+    ProtocolError,
+    Transport,
+    listen,
+)
 
 # How many connections we are willing to open while filling a listener's
 # accept queue before giving up on saturating it.
@@ -335,11 +342,13 @@ def test_accepted_and_dialled_transports_behave_identically() -> None:
 
     dialled = far_end[0]
     try:
-        accepted.send(b'{"seq":1,"type":"request","command":"initialize"}')
-        assert dialled.recv() == '{"seq":1,"type":"request","command":"initialize"}'
+        request = b'{"seq":1,"type":"request","command":"initialize"}'
+        accepted.send(request)
+        assert dialled.recv() == request
 
-        dialled.send(b'{"seq":1,"type":"response","success":true}')
-        assert accepted.recv() == '{"seq":1,"type":"response","success":true}'
+        response = b'{"seq":1,"type":"response","success":true}'
+        dialled.send(response)
+        assert accepted.recv() == response
     finally:
         accepted.close()
         dialled.close()
@@ -349,6 +358,152 @@ def _dial(address):
     """A bare socket connected to `address`, for tests that need something on
     the far end without caring what it is."""
     return socket.create_connection(address, 2.0)
+
+
+# ---- framing errors ----
+
+@contextlib.contextmanager
+def _pair():
+    """A Transport with a bare socket on the far end, to feed it raw bytes."""
+    with contextlib.closing(listen()) as listener:
+        far = _dial(listener.getsockname())
+        transport = Transport.accept(listener, timeout=2.0)
+    try:
+        yield transport, far
+    finally:
+        far.close()
+        transport.close()
+
+
+def _expect_protocol_error(transport, framed: bytes) -> None:
+    try:
+        transport.recv()
+    except ProtocolError:
+        return
+    except Exception as e:
+        raise AssertionError(f"{framed!r} raised {e!r}, expected ProtocolError") from None
+    raise AssertionError(f"{framed!r} was accepted")
+
+
+def test_framing_errors_are_protocol_errors() -> None:
+    """A framing error means a bug on one side of the wire, not a dead
+    connection, and must not reach the reader thread as a bare ValueError."""
+    bad = [
+        b"Content-Type: application/json\r\n\r\n{}",   # no Content-Length
+        b"Content-Length: banana\r\n\r\n{}",           # not a number
+        b"Content-Length: -5\r\n\r\n{}",               # negative
+        b"Content-Length: 0\r\n\r\n",                  # empty body
+    ]
+    for framed in bad:
+        with _pair() as (transport, far):
+            far.sendall(framed)
+            _expect_protocol_error(transport, framed)
+
+
+def test_an_oversized_length_is_rejected_before_buffering() -> None:
+    """Rejected while parsing the header, so it fails now rather than blocking
+    forever on a body the peer is never going to send."""
+    framed = f"Content-Length: {MAX_BODY_SIZE + 1}\r\n\r\n".encode("ascii")
+    with _pair() as (transport, far):
+        far.sendall(framed)
+        started = time.monotonic()
+        _expect_protocol_error(transport, framed)
+        assert time.monotonic() - started < 1.0
+
+
+def test_a_headerless_flood_is_rejected_rather_than_buffered() -> None:
+    with _pair() as (transport, far):
+        junk = b"x" * (MAX_HEADER_SIZE + 4096)
+        far.sendall(junk)
+        _expect_protocol_error(transport, junk)
+
+
+# ---- shutdown / close ----
+
+def test_shutdown_unblocks_a_pending_recv() -> None:
+    """close() alone does not wake a thread already inside recv(); shutdown()
+    is what lets the reader thread be joined instead of abandoned."""
+    with contextlib.closing(listen()) as listener:
+        far = _dial(listener.getsockname())
+        transport = Transport.accept(listener, timeout=2.0)
+
+    outcome: list = []
+    reader = threading.Thread(target=lambda: outcome.append(_recv_outcome(transport)), daemon=True)
+    reader.start()
+    try:
+        time.sleep(0.1)          # let it park inside recv()
+        assert reader.is_alive(), "reader returned before anything was sent"
+
+        transport.shutdown()
+        reader.join(timeout=2.0)
+        assert not reader.is_alive(), "shutdown() did not wake recv()"
+        assert isinstance(outcome[0], ConnectionError), outcome[0]
+
+        transport.close()        # safe now: the reader is gone
+    finally:
+        far.close()
+
+
+def _recv_outcome(transport):
+    try:
+        return transport.recv()
+    except Exception as e:
+        return e
+
+
+# ---- keepalive ----
+
+def test_keepalive_is_configured_on_both_constructors() -> None:
+    """Without it, a peer that dies without closing leaves recv() blocked
+    forever: an idle TCP connection carries no traffic for anything to fail."""
+    with contextlib.closing(listen()) as listener:
+        address = listener.getsockname()
+
+        far_end: list = []
+        dialler = threading.Thread(
+            target=lambda: far_end.append(Transport.connect(*address, timeout=2.0)),
+            daemon=True)
+        dialler.start()
+
+        accepted = Transport.accept(listener, timeout=2.0)
+        dialler.join(timeout=2.0)
+
+    # Spelled out rather than imported: the point is to pin the detection
+    # budget at 30 + 10*3 = 60s, so retuning it has to be deliberate.
+    expected = {
+        "SO_KEEPALIVE": 1,
+        "TCP_KEEPIDLE": 30,
+        "TCP_KEEPINTVL": 10,
+        "TCP_KEEPCNT": 3,
+        "TCP_USER_TIMEOUT": 60_000,
+    }
+
+    dialled = far_end[0]
+    try:
+        for name, transport in (("accepted", accepted), ("dialled", dialled)):
+            sock = transport._sock
+            actual = {
+                option: sock.getsockopt(
+                    socket.SOL_SOCKET if option.startswith("SO_") else socket.IPPROTO_TCP,
+                    getattr(socket, option),
+                )
+                for option in expected
+            }
+            assert actual == expected, (name, actual, expected)
+    finally:
+        accepted.close()
+        dialled.close()
+
+
+def test_keepalive_is_skipped_on_a_non_tcp_socket() -> None:
+    """The TCP-level options do not exist on an AF_UNIX socket, so setting
+    them there raises rather than being ignored."""
+    left, right = socket.socketpair()
+    try:
+        Transport(left)     # must not raise
+    finally:
+        left.close()
+        right.close()
 
 
 TESTS = [
@@ -368,6 +523,12 @@ TESTS = [
     test_accept_leaves_the_listener_open_on_both_paths,
     test_accepted_socket_has_no_read_timeout,
     test_accepted_and_dialled_transports_behave_identically,
+    test_framing_errors_are_protocol_errors,
+    test_an_oversized_length_is_rejected_before_buffering,
+    test_a_headerless_flood_is_rejected_rather_than_buffered,
+    test_shutdown_unblocks_a_pending_recv,
+    test_keepalive_is_configured_on_both_constructors,
+    test_keepalive_is_skipped_on_a_non_tcp_socket,
 ]
 
 

@@ -7,9 +7,13 @@ import threading
 from enum import StrEnum
 from typing import Callable
 
-from .transport import Transport
+from .transport import ProtocolError, Transport
 import pdvp.schema.pydevd_schema as schema
 import pdvp.schema.pydevd_base_schema as base_schema
+
+# How long close() waits for the reader thread after shutting the socket down.
+READER_JOIN_TIMEOUT = 1.0
+
 
 class DAPError(Exception):
     pass
@@ -64,6 +68,12 @@ class Client:
     def close(self) -> None:
         if self.on_disconnect is not None:
             self.on_disconnect()
+
+        # shutdown -> join -> close. The join is skipped when close() is
+        # called from the reader itself, as on_disconnect handlers can be.
+        self._transport.shutdown()
+        if threading.current_thread() is not self._reader_thread:
+            self._reader_thread.join(READER_JOIN_TIMEOUT)
         self._transport.close()
 
     def _next_seq(self) -> int:
@@ -74,8 +84,13 @@ class Client:
     def _read_loop(self) -> None:
         while True:
             try:
-                responce_str = self._transport.recv()
-            except (ConnectionError):
+                responce_str = self._transport.recv().decode("utf-8")
+                print(responce_str)
+            except OSError:
+                # EOF, reset, or a socket closed under us by close().
+                return
+            except ProtocolError as e:
+                print(f"*** dropping pydevd connection: {e}")
                 return
 
             message : schema.ProtocolMessage = base_schema.from_json(responce_str)
@@ -105,7 +120,9 @@ class Client:
         with self._pending_lock:
             self._pending[request.seq] = (event, None)
 
-        self._transport.send(request.to_json().encode("utf-8"))
+        request_str = request.to_json().encode("utf-8")
+        print(request_str)
+        self._transport.send(request_str)
 
         if not event.wait(timeout):
             raise DAPError(f"timed out waiting for response to '{command}'")
