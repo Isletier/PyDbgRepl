@@ -6,16 +6,17 @@ import time
 from pdvp.commands.breakpoints import commit_all
 
 from .. import dap as _dap
+from .. import events
 from pdvp import launch
 from ..config import CONFIG
 from ..session import SESSION
 from pdvp.model import Error, Status, StopResult
 from ._internal import (
     _clear_dap_state,
+    _dispatch,
     _end_session,
-    _on_dap_disconnect,
+    _resume,
     _stream_output,
-    _wait_for_resume_result,
 )
 
 __all__ = ["run", "stop", "connect", "disconnect", "terminate", "restart"]
@@ -113,7 +114,8 @@ def _run(
             return Error(f"pydevd did not connect within {CONFIG.accept_timeout}s")
 
     prefix_lines.append(f"connected to pydevd on {host}:{port}")
-    return _handshake(_dap.Client(transport), prefix_lines)
+    return _handshake(_dap.Client(transport, on_event=_dispatch), prefix_lines,
+                      pid=SESSION.process.child.pid)
 
 
 def _stop_session() -> None:
@@ -176,27 +178,32 @@ def _connect(prefix_lines: list[str] | None = None) -> StopResult | Error:
     transport = _dap.Transport.connect(host, port, CONFIG.connection_timeout, CONFIG.connection_retry)
 
     prefix_lines.append(f"connected to pydevd on {host}:{port}")
-    return _handshake(_dap.Client(transport), prefix_lines)
+    return _handshake(_dap.Client(transport, on_event=_dispatch), prefix_lines)
 
 
-def _handshake(client, prefix_lines: list[str]) -> StopResult | Error:
+def _handshake(client, prefix_lines: list[str], pid: int | None = None) -> StopResult | Error:
     """Everything after the socket exists -- identical whether we dialled or
     accepted, which is the point of confining the asymmetry to construction."""
-    _check_capabilities(client.initialize())
-    client.attach()
-    client.wait_for_event("initialized", timeout=5)
+    # Adopting the client also re-arms the bus's ending latch: without that,
+    # the SessionEnded left over from the previous run() would swallow this
+    # session's, and every wait would be unbounded again.
+    SESSION.begin(client, pid=pid)
 
-    client.on_disconnect = _on_dap_disconnect
-    SESSION.client = client
-    SESSION.running = True
+    # `initialized` routinely arrives before the response to the request that
+    # caused it, so arm first and trigger second.
+    with SESSION.bus.subscribe(events.Initialized) as initialized:
+        _check_capabilities(client.initialize())
+        client.attach()
+        if not isinstance(initialized.get(), events.Initialized):
+            _end_session()
+            return Error("pydevd went away during the handshake")
 
     commit_all()
 
-    client.configuration_done()
-
     # configurationDone() resumes the debuggee; block for its first stop
-    # (initial breakpoint) or exit, same as cont()/step() etc.
-    return _wait_for_resume_result(client, prefix="\n".join(prefix_lines))
+    # (initial breakpoint) or exit, same as cont()/step() etc. No thread id --
+    # nothing has stopped yet, so there is nothing to bump.
+    return _resume(None, lambda c: c.configuration_done(), prefix="\n".join(prefix_lines))
 
 
 def disconnect() -> Status | Error:
@@ -205,7 +212,6 @@ def disconnect() -> Status | Error:
         return Error("not connected")
 
     client = SESSION.client
-    client.on_disconnect = None
     try:
         client.disconnect(terminate_debuggee=False)
     except _dap.DAPError:

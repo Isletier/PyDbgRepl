@@ -76,7 +76,7 @@ All of these now **block** until the program stops/exits — see
 | `next()` | `StopResult \| Error` | Step one line, stepping over calls. | done |
 | `finish()` | `StopResult \| Error` | Run until the current frame returns. | done |
 | `interrupt()` | `Status \| Error` | Pause a running debuggee. Called directly by the Ctrl+C handler in `src/__init__.py`. | done |
-| `until(line=None)` | `StopResult \| Error` | Run until `line` (or the next line greater than the current one, if omitted) in the current file. Emulated since DAP has no "run until line" primitive: set a temporary breakpoint, `cont()`, then clear it — same idea as `tbreak` + `cont`. | done |
+| `until(line=None)` | `StopResult \| Error` | Run until `line` in the current file. DAP has no "run until line" primitive, so it was emulated: temporary breakpoint, `cont()`, clear. **Removed** — three round trips behind one command, which is a composite, not a command. Composite commands need a design first (architecture.md §9). | removed |
 | `jump(line)` | `StopResult \| Error` | Jump execution to `line` without running the lines in between. Resolves targets via `gotoTargets`, then `goto`. Skips/reruns code — same caveats as gdb's `jump` (no cleanup of skipped statements). | done |
 | `stepi()` / `nexti()` | — | Instruction-level stepping. Not meaningful here — pydevd traces Python bytecode/lines, not a CPU-instruction concept. | n/a |
 | reverse execution (`reverse-continue`, `stepBack`) | — | pydevd doesn't implement this (`supportsStepBack=False`). | n/a |
@@ -183,7 +183,8 @@ imports.
 5. ~~**`display()`/`undisplay()`**~~ — done.
 6. ~~**`breakpoints()`**~~ — done.
 7. ~~**`tbreak()`, `enable()`/`disable()`, `ignore()`, logpoints, `funcbreak()`**~~ — done.
-8. ~~**`until()`, `jump()`**~~ — done.
+8. ~~**`until()`, `jump()`**~~ — `jump()` done; `until()` was done and has since
+   been removed as a composite (see its row above).
 9. ~~**`restart()`**~~ — done.
 10. ~~**`whatis()`, `setvar()`, `modules()`, `pydevd_info()`, `completions()`**~~ — done.
 

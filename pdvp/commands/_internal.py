@@ -12,6 +12,7 @@ import threading
 import tty
 
 from .. import dap as _dap
+from .. import events
 from ..config import CONFIG
 from ..session import SESSION
 from pdvp.model import Error, StopResult
@@ -57,6 +58,25 @@ def _async_print(message: str) -> None:
     sys.stdout.flush()
 
 
+# ---- the reducer: DAP in, pdvp events out ----
+
+def _dispatch(message) -> None:
+    """The Client's `on_event` sink. Runs on the reader thread.
+
+    Session does the reduction and the publishing; the only thing that belongs
+    to Layer 4 is what to do about a death nobody is waiting for.
+    """
+    SESSION.reduce(message)
+
+    if (isinstance(message, _dap.ConnectionClosed)
+            and not message.deliberate
+            and not SESSION.awaiting_resume):
+        # Nobody is blocked in _resume() to notice and tear the session down,
+        # so do it here and say so.
+        _end_session()
+        _async_print("*** connection to pydevd lost")
+
+
 # ---- session lifetime ----
 
 def _clear_dap_state() -> None:
@@ -70,20 +90,14 @@ def _clear_dap_state() -> None:
     # _internal (for _current_file), so the module-level edge only goes one way.
     from .breakpoints import invalidate_all
 
-    SESSION.client = None
-    SESSION.running = False
-    SESSION.current_thread_id = None
-    SESSION.current_frame_id = None
-    SESSION.sourceMap.clear()
+    SESSION.end_connection()
     invalidate_all()
 
 
 def _end_session() -> None:
     """Tear down the pydevd connection and any spawned process together as one unit."""
     if SESSION.client is not None:
-        client = SESSION.client
-        client.on_disconnect = None
-        client.close()
+        SESSION.client.close()
 
     if SESSION.process is not None:
         if SESSION.process.child.poll() is None:
@@ -158,11 +172,24 @@ class _StdinPassthrough:
 
 # ---- blocking resume + event handling ----
 
-_RESUME_RESULT_EVENTS = {"stopped", "exited", "terminated", "_disconnected"}
+def describe_thread(thread_id: int | None) -> str:
+    return "all threads" if thread_id is None else f"thread {thread_id}"
 
 
-def _wait_for_resume_result(client: _dap.Client, prefix: str = "") -> StopResult:
-    """Block until the resumed program stops, exits, or the connection drops.
+def _resume(thread_id: int | None, request, prefix: str = "") -> StopResult | Error:
+    """Resume `thread_id` (None meaning all) and block until the program stops,
+    exits, or the connection drops.
+
+    `request(client)` issues the actual DAP request. Every state-changing
+    operation routes through here, which is what makes the thread control
+    right a single acquisition site: it is held from the send until the stop,
+    so two callers resuming one thread become two serialized runs rather than
+    one run reported as two.
+
+    The subscription is opened before the request goes out, because a `stopped`
+    routinely beats the response to the request that caused it onto the wire.
+    `SessionEnded` is on every subscription whether asked for or not, which is
+    what makes this wait bounded without a timeout.
 
     While blocked, forwards our stdin to the inferior's pty -- only if its
     stdin is still the owned-PTY-pair slave (not under --pty, not redirected
@@ -172,44 +199,72 @@ def _wait_for_resume_result(client: _dap.Client, prefix: str = "") -> StopResult
     `prefix` is shown before the outcome in the returned StopResult's repr,
     e.g. "continuing" or "launched pid=1234\nconnected to 127.0.0.1:5678".
     """
-    passthrough = None
-    if (
-        SESSION.process is not None
-        and SESSION.process.master_fd is not None
-        and SESSION.process.stdin_is_pty
-    ):
-        passthrough = _StdinPassthrough(SESSION.process.master_fd)
-        passthrough.start()
+    error = SESSION.require_connected()
+    if error is not None:
+        return error
 
-    try:
-        message = client.wait_for_events(_RESUME_RESULT_EVENTS)
-    finally:
-        if passthrough is not None:
-            passthrough.stop()
+    def announce() -> None:
+        print(f"*** waiting for control of {describe_thread(thread_id)}")
 
-    event = message.event
-    body = message.body
+    with SESSION.control.hold(thread_id, announce=announce):
+        # Re-checked after acquiring, not before: whoever held the right may
+        # have run this thread somewhere else entirely, or ended the session,
+        # while we waited. A resume naming no thread has nothing to check --
+        # the handshake's initial one happens before anything has stopped.
+        error = SESSION.require_connected()
+        if error is None and thread_id is not None:
+            error = SESSION.require_stopped(thread_id)
+        if error is not None:
+            return error
 
-    if event == "stopped":
-        result = _report_stopped(body, prefix=prefix)
-        SESSION.running = False
-        return result
+        return _await_stop(thread_id, request, prefix)
 
-    # "exited"/"terminated"/"_disconnected" all mean this session is over —
-    # the pydevd connection and any spawned process share one lifetime.
+
+def _await_stop(thread_id: int | None, request, prefix: str) -> StopResult:
+    """The resume itself, with the control right already held."""
+    with SESSION.bus.subscribe(events.Stopped) as outcome, SESSION.resume_wait():
+        # Bumped before the request goes out. An early bump costs a spurious
+        # "frame is stale" if the send fails; a late one hands back wrong data
+        # silently. From here on a Ctrl+C also has something to interrupt.
+        SESSION.note_resume(thread_id)
+        try:
+            request(SESSION.client)
+        except BaseException:
+            SESSION.undo_resume(thread_id)
+            raise
+
+        passthrough = None
+        if (
+            SESSION.process is not None
+            and SESSION.process.master_fd is not None
+            and SESSION.process.stdin_is_pty
+        ):
+            passthrough = _StdinPassthrough(SESSION.process.master_fd)
+            passthrough.start()
+
+        try:
+            event = outcome.get()
+        finally:
+            if passthrough is not None:
+                passthrough.stop()
+
+    if isinstance(event, events.Stopped):
+        return _report_stopped(event, prefix=prefix)
+
+    # Exit, termination and disconnection are one ending — the pydevd
+    # connection and any spawned process share one lifetime.
     _end_session()
-    return StopResult(event, body, prefix=prefix)
+    return StopResult(event, prefix=prefix)
 
 
-def _report_stopped(body: dict, prefix: str = "") -> StopResult:
-    SESSION.current_thread_id = body.threadId
-    SESSION.current_frame_id = None
-    reason = body.reason
+def _report_stopped(event: events.Stopped, prefix: str = "") -> StopResult:
+    SESSION.current_thread_id = event.thread_id
+    reason = event.reason
 
     top = None
-    if SESSION.current_thread_id is not None:
+    if event.thread_id is not None:
         try:
-            trace = SESSION.client.stack_trace(SESSION.current_thread_id, levels=1)
+            trace = SESSION.client.stack_trace(event.thread_id, levels=1)
             frames = trace.body.stackFrames
             if frames:
                 top = frames[0]
@@ -219,38 +274,18 @@ def _report_stopped(body: dict, prefix: str = "") -> StopResult:
 
     suffix_lines = [line for line in (hook(reason, top) for hook in post_stop_hooks) if line]
 
-    return StopResult("stopped", body, top_frame=top, prefix=prefix, suffix="\n".join(suffix_lines))
-
-
-def _on_dap_disconnect() -> None:
-    if SESSION.client is None:
-        return
-    if SESSION.running:
-        # Main thread is blocked in _wait_for_resume_result(); wake it up so
-        # it can report the disconnect and tear down the session itself.
-        SESSION.client.events.put({"event": "_disconnected", "body": {}})
-        return
-    _end_session()
-    _async_print("*** connection to pydevd lost")
+    return StopResult(event, top_frame=top, prefix=prefix, suffix="\n".join(suffix_lines))
 
 
 # ---- guards ----
 
-def _ensure_dap_paused() -> Error | None:
-    if SESSION.client is None:
-        return Error("not connected (use connect())")
-    if SESSION.running:
-        return Error("program is running")
-    return None
+def _ensure_connected() -> Error | None:
+    return SESSION.require_connected()
 
 
 def _ensure_thread_paused() -> Error | None:
-    err = _ensure_dap_paused()
-    if err is not None:
-        return err
-    if SESSION.current_thread_id is None:
-        return Error("no current thread (use threads())")
-    return None
+    """The gate on everything frame-scoped: connected, a thread selected, and stopped."""
+    return SESSION.require_stopped(SESSION.current_thread_id)
 
 
 # ---- current location & path/line shortcuts ----
@@ -260,7 +295,7 @@ def _current_location() -> tuple[str | None, int | None]:
     if SESSION.client is not None and SESSION.current_frame_id is not None:
         try:
             trace = SESSION.client.stack_trace(SESSION.current_thread_id)
-            for f in trace["stackFrames"]:
+            for f in trace.body.stackFrames:
                 if f["id"] == SESSION.current_frame_id:
                     path = (f.get("source") or {}).get("path")
                     if path:

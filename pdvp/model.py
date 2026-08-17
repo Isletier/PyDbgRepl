@@ -5,6 +5,7 @@ the REPL's normal repr-echo of expression statements) and returns something
 usable from scripts (iterate, index, pass to other code).
 """
 from __future__ import annotations
+from pdvp import events
 from pdvp.source import SourcePath
 
 class Breakpoint:
@@ -206,12 +207,14 @@ class Error(Status):
 
 
 class StopResult:
-    """Result of a blocking resume (cont()/step()/next()/finish()/until()/
-    jump()/connect()/run()/restart()): what happened, and -- if stopped --
-    where. `event` is "stopped"/"exited"/"terminated"/"_disconnected"; for
-    "stopped", `reason`/`top_frame` describe the new location (`top_frame`
-    is the raw top `stackTrace` frame dict, or None if it couldn't be
-    fetched); for "exited", `exit_code` is the process's exit code.
+    """Result of a blocking resume (cont()/step()/next()/finish()/jump()/
+    connect()/run()/restart()): what happened, and -- if stopped -- where.
+
+    `event` is the pdvp event that ended the wait: an `events.Stopped`, whose
+    `reason`/`top_frame` describe the new location (`top_frame` is the raw top
+    `stackTrace` frame dict, or None if it couldn't be fetched), or an
+    `events.SessionEnded`, whose `reason` says which of exit, termination and
+    disconnection got there first.
 
     `prefix`, if set, is one or more status lines (e.g. "continuing",
     "launched pid=...") shown before the outcome. `suffix`, if set, is one or
@@ -221,42 +224,43 @@ class StopResult:
 
     def __init__(
         self,
-        event: str,
-        body: dict,
+        event: events.Event,
         top_frame: dict | None = None,
         prefix: str = "",
         suffix: str = "",
     ):
         self.event = event
-        self.body = body
         self.top_frame = top_frame
         self.prefix = prefix
         self.suffix = suffix
 
-    # `body` is a schema event body (StoppedEventBody, ExitedEventBody, ...),
-    # except for the synthetic "_disconnected" event, whose body is a plain
-    # dict -- hence getattr rather than attribute access.
+    @property
+    def stopped(self) -> bool:
+        return isinstance(self.event, events.Stopped)
+
     @property
     def reason(self) -> str | None:
-        return getattr(self.body, "reason", None) if self.event == "stopped" else None
+        return getattr(self.event, "reason", None)
 
     @property
     def exit_code(self) -> int | None:
-        return getattr(self.body, "exitCode", None) if self.event == "exited" else None
+        return getattr(self.event, "exit_code", None)
 
     def __repr__(self) -> str:
-        if self.event == "stopped":
+        if self.stopped:
             if self.top_frame is None:
                 line = f"*** stopped ({self.reason})"
             else:
                 path = (self.top_frame.get("source") or {}).get("path", "?")
                 line = f"*** stopped ({self.reason}) at {path}:{self.top_frame['line']}, in {self.top_frame['name']}"
-        elif self.event == "exited":
+        elif self.exit_code is not None:
             line = f"*** program exited with code {self.exit_code}"
-        elif self.event == "terminated":
-            line = "*** program terminated"
-        else:  # "_disconnected"
+        elif self.reason is events.EndReason.DISCONNECTED:
             line = "*** connection to pydevd lost"
+        elif self.reason is events.EndReason.CLOSED:
+            line = "*** session closed"
+        else:
+            line = "*** program terminated"
         if self.prefix:
             line = f"{self.prefix}\n{line}"
         if self.suffix:
@@ -285,7 +289,7 @@ class FrameRef(dict):
 
 class Breakpoints:
     """All breakpoints from breakpoints(): line breakpoints by file
-    (`by_file`, same shape as `SESSION.breakpoints`), function breakpoints,
+    (`by_file`, keyed by source path), function breakpoints,
     and exception filters."""
 
     def __init__(self, by_file: dict[str, list[dict]], function_breakpoints: list[dict], exception_filters: list[str]):

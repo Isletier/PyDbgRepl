@@ -65,7 +65,7 @@ single consumer.
                    └──────────────┴────────┬────────┘      │ drains
                                            │               │
                                            v               │
-                                       Commands            │
+                                       Commands ───────────┤ subscribes
                                            │               │
                               ┌────────────┴───────┐       │
                               v                    v       │
@@ -84,28 +84,46 @@ whose consumer is the prompt; it is a surface that any caller uses, and the even
 bus is one of those callers (P0). Drawing it as a linear stack produced a
 contradiction — the bus sitting "below" commands while calling up into them.
 
-### Two delivery paths, one producer
+Commands both sits above the bus and subscribes to it, and publishes its own
+events to it. That is not a cycle, because the bus never calls into anything:
+fan-out only queues, so nothing above it can be re-entered. Wiring is bottom-up
+and acyclic —
 
-Every message the reader parses goes two independent ways:
+```python
+bus     = EventBus()                                    # program lifetime
+session = Session(bus)                                  # program lifetime
+client  = Client(transport, on_event=session.on_event)  # per connection
+```
+
+— so the handshake needs no special case. `initialized` is awaited by an ordinary
+subscription taken out before `initialize` is sent.
+
+The bus and Session are constructed once and outlive any one connection; only
+Client is per-connection. A subscription taken before a `run()` still works after
+the next one, which is what "a user's subscription is long-lived" has to mean.
+
+### Responses and events
+
+A DAP message is either a response or an event, and the two are delivered by
+different machinery because they *are* different — not as a design choice:
 
 ```
-reader thread ──┬─> waiter registry   (wakes whoever is blocked in a command)
-                └─> subscriptions     (fan-out to consumer-owned queues)
+                          ┌─> response table   keyed by seq, point-to-point
+reader ──> reduce state ──┤
+                          └─> bus fan-out      keyed by name, one copy each
 ```
 
-This is the invariant that makes an event consumer calling `cont()` safe: the
-wait is resolved by the **reader**, never by any consumer, so a busy consumer
-cannot starve it.
+A response has exactly one interested caller, identified by `seq`. An event has
+N, identified by name. Nothing else motivates the split, and there is no third
+mechanism: **event waiting happens in exactly one place, the bus.**
 
-It also creates the one deadlock that must be designed out. If the reader can
-ever *block* enqueueing to the public queue:
+Commands use both, from above: `client.request(...)` for the response,
+`bus.subscribe(...)` for the event. Client therefore has no event-waiting API of
+its own, which is what keeps it a plain DAP client (P2).
 
-> a consumer blocks in `cont()` → its subscription queue fills → reader blocks
-> on `put()` → reader cannot wake `cont()`'s waiter → both stuck forever.
-
-So **the reader thread must never block on anything user code can influence.**
-Bounded-with-drop-oldest is a correctness requirement, not a memory-pressure
-tweak; a plain blocking bounded queue is a deadlock.
+The reader thread must never block on anything user code can influence, so
+fan-out puts into unbounded queues. That is one line of policy, not a hazard to
+design around.
 
 ### Layer 0 — Transport
 
@@ -130,37 +148,58 @@ no session. It is reusable against any DAP peer, which is the test for whether
 something belongs here.
 
 ```
-send(request)          -> Pending    # allocate seq, register waiter, transmit
-expect(*event_names)   -> Pending    # arm before the trigger (P5)
-request(request)       -> Response   # send(...).wait(), sugar over the primitive
+send(request)          -> Pending    # allocate seq, register slot, transmit
+request(request)       -> Response   # send(...).wait(), plus a check on success
 close()
-on_event: Callable     # single sink, invoked on the reader thread
+on_event: Callable     # single sink, invoked on the reader thread; constructor arg
 ```
 
-`Pending.wait()` blocks until its message arrives or the connection dies.
-`Pending` is a context manager that unregisters on exit.
+`Pending.wait()` blocks until its response arrives or the connection dies, and
+returns the response whether or not it succeeded. `Pending` is a context manager
+that unregisters on exit.
 
-**One registry, not two.** A waiter is a *predicate plus a slot*. A response
-waiter matches `seq`; an event waiter matches a name set. This is the single
-most important simplification in the design: two registries meant two death
-loops, two registration-vs-death races, two lifetimes. One registry means death
-walks one list, once.
+`request()` **raises** `RequestFailed` on `success: false`. Under concurrent
+callers a failure attributed to the wrong command is worse than an exception, so
+the convenient surface raises and the primitive returns the failed response for
+anyone who wants to inspect it.
+
+The sink receives `schema.Event` for anything the peer sent, and exactly one
+`ConnectionClosed` when the connection is over. `ConnectionClosed` is a small
+record, deliberately **not** a `schema.Event`: DAP has no such event, and
+inventing one would mean every consumer has to know which of its "DAP" events are
+actually ours. It carries whether the close was deliberate, which is the
+difference between a clean teardown and a failure — and it travels the ordinary
+sink, so nothing above needs a second channel to learn about death.
+
+A reverse request (adapter→client) is answered with `success: false`. We
+implement none of them, and a peer waiting on an answer it will never get is
+worse than a refusal.
+
+**No event-waiting API.** Client correlates responses and forwards events; it
+never blocks anyone on an event. A command that needs one subscribes to the bus
+before sending (P5). This is what keeps Client reusable against any DAP peer —
+it needs nothing above it.
+
+The response table is therefore a plain `dict[seq, slot]` plus the death record.
+Death walks one dict, once.
 
 **`on_event` is one attribute, not a subscriber list.** Client has one consumer
-(P2). Multi-subscriber fan-out lives in Layer 3.
+(P2). Multi-subscriber fan-out lives in Layer 3. It is a **constructor
+argument**, not an attribute assigned afterwards: the reader thread must not be
+running before its sink exists.
 
 Locks:
 
-- `_registry` — covers `seq`, the waiter list, the death record, and the
-  deliberate-close flag. Seq allocation and waiter registration must be atomic
-  with each other, or the reader can deliver a response before its waiter
-  exists. Registration must be atomic with death, or a waiter registered just
+- `_registry` — covers `seq`, the response table, the death record, and the
+  deliberate-close flag. Seq allocation and slot registration must be atomic
+  with each other, or the reader can deliver a response before its slot
+  exists. Registration must be atomic with death, or a caller registered just
   after the death sweep blocks forever (P4).
 - `_send` — socket writes only. A DAP message is header plus body across
   multiple writes; interleaving corrupts the stream.
 
 These are deliberately separate. Holding the registry lock across a blocking
-`send()` would couple every waiter to socket backpressure. Two sends from
+`send()` would couple every pending caller to socket backpressure. Two sends from
 different threads may then reach the wire out of seq order, which is harmless:
 `seq` is an identifier, not an ordering constraint, and two calls from the *same*
 thread still serialize by being sequential. Cross-thread ordering was never
@@ -211,7 +250,8 @@ mode it is trivially uniform, so one structure serves both modes.
 
 #### Cursor
 
-`current_thread_id`, and `current_frame` as `(thread_id, epoch, frame_id)`.
+`current_thread_id`, and `current_frame` as `(thread_id, epoch, frame_id)` —
+`FrameHandle` in the code, held in a `ContextVar`.
 
 The cursor is **context-local**, not global. The REPL has one; each user thread
 draining a subscription has its own. `frame()`, `up()`, `down()` and thread
@@ -225,6 +265,11 @@ every caller gets the full API because every caller has its own cursor.
 Switching threads clears the frame cursor unconditionally: a frame handle from
 thread A is meaningless once B is selected, independent of running/stopped.
 
+Nothing else clears it, and nothing else can: a lifetime reset may run on any
+thread, and a `ContextVar` is only writable from the context that owns it. It
+does not need to. Both resets empty the thread table, so a cursor left over from
+a dead session fails its guard rather than reading anything.
+
 #### Two independent read guards
 
 Handles need **both** of these. Neither implies the other.
@@ -232,6 +277,11 @@ Handles need **both** of these. Neither implies the other.
 **1. Epoch match.** Every handle carries the epoch it was minted in. Using one at
 a different epoch is a clean error — "frame is stale, the program has resumed
 since" — not a pydevd error and not wrong data.
+
+Epochs are drawn from a session-wide seed rather than restarting at zero per
+thread. pydevd hands out small thread ids and reuses them across runs, so a
+per-thread counter would let a handle from the previous session validate against
+a brand new thread that happened to inherit its id.
 
 **2. The thread must be stopped.** Epochs only move on resume, so a *running*
 thread's stack churns continuously at a constant epoch. Frame-scoped reads
@@ -268,26 +318,86 @@ epoch has moved.
 | `exited` / `terminated` | process-lifetime reset |
 | `disconnected` | connection-lifetime reset |
 
+The reducer cannot ask pydevd anything, so the one thing it cannot do for
+itself — reconcile the table against a `threads` response — is fed back by the
+caller that made the round trip (`adopt_threads`). A thread first mentioned by a
+`stopped` event joins the table there and then, which is what makes `connect()`
+to a pydevd that started without us work at all: it replays no `thread` events
+for threads that already exist.
+
 Bump **at send**, not on the `continued` event. An early bump costs a spurious
 "stale frame" error on a race; a late bump returns wrong data silently. Fail in
 the direction that is visible.
 
 ### Layer 3 — Event bus
 
-*Vocabulary:* pdvp events. *Consumer:* user code.
+*Vocabulary:* pdvp events. *Consumers:* user code, and Commands.
+
+This is the **only** place anything waits for an event. Commands are not a
+special case: `cont()` opens a private, short-lived subscription exactly the way
+user code opens a long-lived one.
+
+#### The events are ours, not DAP's
+
+The bus carries pdvp types, declared statically — one frozen dataclass per event.
+Some are translated from a DAP event; others are ours and have no DAP
+counterpart. A subscriber cannot tell which is which, and that is the point: the
+frontend can add an event without the debugger core having anything to say.
+
+Forwarding `schema.Event` straight through would make that impossible, because
+every event on the bus would have to be one DAP has a name for.
+
+**Subscriptions key on the class, not the name.** It is typo-proof, `match=` gets
+a typed argument, and a base class subscribes to a family — `ThreadEvent` takes
+every per-thread event, no arguments takes everything. A name-keyed bus can
+express none of that. Names are still accepted and resolved to classes at
+subscribe time, so a typo is a `LookupError` rather than a stream that never
+fires.
+
+#### One event for the end of things
+
+`SessionEnded(reason, exit_code)` covers the debuggee exiting, the debuggee being
+terminated, and the connection dying. Those are three signals for one fact,
+because we tie the inferior's lifetime to the connection's (§6) — so **the first
+signal wins and latches**, and one ending is one event. `SessionStarted` re-arms
+the latch for the next connection.
+
+It is in **every** subscription's type set, added whether or not it was asked
+for. That is how P4 lands here: a wait ends because its event arrived or because
+the session ended, and there is no third outcome and nothing to forget to check
+for. A waiter is obliged to expect it; `get()` returns it like any other event,
+so nothing raises out of the queue layer.
 
 There is **no dispatch thread and no callback registry**. The whole API is a
 subscription — a blocking queue the subscriber owns:
 
 ```
-bus.subscribe(*names) -> Subscription
+bus.subscribe(*types, match=None, maxsize=0) -> Subscription
+bus.publish(event)
 
 Subscription:
-    get(timeout=None) -> Event    # blocks; woken by close() and by death
+    get(timeout=None) -> Event    # blocks; woken by close() and by SessionEnded
     __iter__                      # for event in sub: ...
     close()
     __enter__ / __exit__
 ```
+
+`match` is an optional predicate applied at fan-out, so a command waiting on one
+thread's `stopped` does not hand-roll a discard loop. It is never applied to
+`SessionEnded`: a filter that could reject the ending would be a filter that can
+hang a wait.
+
+```python
+with bus.subscribe(Stopped, match=lambda e: e.thread_id == tid) as sub:
+    client.request(continue_request)
+    match sub.get():
+        case Stopped() as stop: ...
+        case SessionEnded() as end: ...
+```
+
+Subscribing before sending is what satisfies P5, and it makes the order the two
+messages reach the wire irrelevant — the `stopped` is queued whether or not the
+`continue` response beat it.
 
 `get()` blocks — this is not polling. The subscriber's thread sleeps until an
 event arrives. Running that loop on a thread is the subscriber's job; we do not
@@ -311,13 +421,18 @@ list under a short lock, non-blocking put into each.
   corrupt another's view.
 - **Events carry their own snapshot.** Subscribers run late; reading live state
   would show them a different world than the event describes.
-- **Fan-out is non-blocking, drop-oldest, per subscription.** Correctness rule,
-  not a memory tweak: see "two delivery paths" above. Scoped per subscriber, so
-  a slow consumer only degrades itself.
+- **Fan-out never blocks the reader.** Queues are unbounded by default, so `put()`
+  cannot stall. `maxsize` is available per subscription for a consumer that knows
+  it will lag and prefers drop-oldest to unbounded growth — a memory policy, and
+  the only thing it protects against is a subscription nobody drains.
 - **Ordering holds within a subscription**, and is not promised across them.
-- **P4 extends here.** A thread blocked in `get()` must be woken by connection
-  death and by `close()`, or it hangs at exit — the same totality obligation the
-  waiter registry carries.
+- **P4 lands here for events.** A thread blocked in `get()` must be woken by
+  `SessionEnded` and by `close()`, or it hangs at exit. Since commands wait here
+  too, this is the *only* place an event wait can hang — the obligation is not
+  duplicated in Client, which owes the same totality to responses alone.
+- **A broken subscriber cannot break the bus.** `match` runs on the reader
+  thread, so an exception from one is caught, counted on the subscription, and
+  treated as no-match. The reader survives; the ending still gets through.
 
 Double-visibility remains and is now unremarkable: a consumer that calls `cont()`
 receives the next `stopped` as its return value *and* finds it in its own queue.
@@ -327,11 +442,14 @@ Synthetic events — those pdvp invents because DAP has no equivalent:
 
 | Event | Why it must be synthetic |
 |---|---|
-| `disconnected` | the peer cannot report its own death |
-| `session_started` / `session_ended` | DAP has no notion of *our* session; `disconnect()` produces none of exited/terminated/disconnected |
+| `SessionStarted` | DAP has no notion of *our* session |
+| `SessionEnded` | the peer cannot report its own death, and `disconnect()` produces none of exited/terminated |
 
 The rule: never invent an event that merely renames a DAP one. There is no
-`breakpoint_hit` event — that is `stopped` with `reason == "breakpoint"`.
+`breakpoint_hit` event — that is `Stopped` with `reason == "breakpoint"`. A DAP
+event we have no type for is published as `UnhandledDapEvent` rather than
+dropped, so a core that grows a message shows up in a subscriber's stream
+instead of vanishing.
 
 ### Layer 4 — Commands
 
@@ -404,7 +522,7 @@ resume(thread_id, request) -> StopResult | Resumption
 ```
 
 All-stop returns a resolved `StopResult`; non-stop returns a `Resumption` the
-user can `.wait()` on later. `cont()`, `step()`, `next()`, `finish()`, `until()`
+user can `.wait()` on later. `cont()`, `step()`, `next()`, `finish()`, `jump()`
 and the post-`configurationDone` initial stop all route through it. One place
 knows about the mode.
 
@@ -430,8 +548,9 @@ relates to that:
 ### Why a right is needed at all
 
 Without one, two callers resuming the same thread produce **one** resumption —
-pydevd resumes on the first `continue`, the second is a no-op, and both waiters
-match the same `stopped`. Two commands, one run, success reported to both. A
+pydevd resumes on the first `continue`, the second is a no-op, and both
+subscriptions match the same `stopped`. Two commands, one run, success reported
+to both. A
 silently swallowed command is the worst outcome available; the other races
 degrade acceptably (a `step` against a running thread is a clean pydevd error, and
 a concurrent `pause` correctly surfaces as `reason: "pause"` — the Ctrl+C path).
@@ -444,7 +563,7 @@ With the right, N continues become N serialized runs.
   resulting stop**.
 - **`pause` is exempt.** Measured (§8): pause is idempotent — a second pause on
   an already-suspended thread emits nothing at all — so it cannot corrupt another
-  caller's armed waiter. The exemption is what keeps Ctrl+C working and is the
+  caller's armed subscription. The exemption is what keeps Ctrl+C working and is the
   escape hatch when one caller's long run is making another wait.
 - Reads and state-independent operations never touch it.
 - No timeout, per P4; released when the stop arrives or the connection dies. No
@@ -511,7 +630,7 @@ Four threads, and one thing that looks like a thread but isn't.
 | Thread | Role |
 |---|---|
 | **main** | REPL: at the prompt, or inside one command |
-| **reader** | recv → parse → reduce → wake waiters → enqueue public events |
+| **reader** | recv → parse → reduce → resolve responses → fan out events |
 | **user threads** | zero or more, owned by user code, draining subscriptions and issuing commands |
 | **pty pump** | inferior output → Console |
 
@@ -529,8 +648,11 @@ while holding it.
 
 ## 6. Death and teardown
 
-One synthetic `disconnected`, produced at the Client layer, is the sole death
-signal. Every registered waiter is woken by it (P4).
+Connection death is reported once, at the Client layer, through `on_event` — the
+ordinary path, so the bus needs no separate channel to learn the connection is
+gone. The reducer turns it into `SessionEnded`, the same event the debuggee
+exiting produces, because they are the same fact. Every pending response is woken
+by the death sweep and every blocked `get()` by the ending (P4).
 
 - `close()` is idempotent, and safe to call from any caller including the reader
   thread itself (it must not self-join).
@@ -542,7 +664,7 @@ signal. Every registered waiter is woken by it (P4).
 
 **Interrupt is not a teardown path.** Ctrl+C during a blocked `cont()` sends
 `pause`; pydevd suspends the thread and emits `stopped` with `reason: "pause"`,
-which the already-armed waiter resolves on. The wait ends because what it was
+which the already-armed subscription resolves on. The wait ends because what it was
 waiting for happened — no abandonment, no distinction between "at the prompt"
 and "inside a wait" needed.
 
@@ -561,9 +683,21 @@ transport keepalive.
 
 ## 7. Decided
 
-- Client is async; `request()` is sugar over `send().wait()`
-- One waiter registry keyed by predicate, covering responses and events alike
-- `expect()` armed before the trigger is the only correct spelling of "do X then
+- Client is async; `request()` is `send().wait()` plus a success check, and raises
+  `RequestFailed` where the primitive returns the failed response
+- Responses correlate by `seq` inside Client; events wait only on the bus. Client
+  has no event-waiting API, so it stays a plain DAP client
+- The bus carries pdvp event types, declared statically, and subscriptions key on
+  the class — so a family subscribes with a base class and our own events are
+  indistinguishable from translated ones
+- One `SessionEnded` for the end of things: debuggee exit, termination and
+  connection death are one fact, first signal latches. It is in every
+  subscription whether or not it was asked for
+- The bus and Session are program-lifetime; only Client is per-connection
+- Commands use both surfaces from above: `client.request()` for the response,
+  `bus.subscribe()` for the event. A command's subscription is private and
+  short-lived; a user's is long-lived. Same mechanism
+- Subscribing before the trigger is the only correct spelling of "do X then
   await Y"
 - No timeouts above Transport
 - Reducer on the reader thread; user code sees events only via subscription
@@ -572,7 +706,7 @@ transport keepalive.
 - Epoch-tagged handles, bumped at resume-send
 - Both execution modes supported; `steppingResumesAllThreads` pinned false
 - Cursor is context-local; every caller has the full API
-- `interrupt()` is fire-and-forget; the armed waiter resolves on `stopped`
+- `interrupt()` is fire-and-forget; the armed subscription resolves on `stopped`
 - Thread control right: implicit per state-changing command, explicitly holdable
   via `control()`, `pause` exempt
 - Frame-scoped reads gated on the stopped flag, separately from the epoch check
@@ -599,6 +733,7 @@ Observed against pydevd 3.5.0, not inferred from the spec. Reproducible with
 | `variables` on a running thread's frame | **succeeds, returns `[]`** — success-shaped garbage, no error |
 | Second `pause` while running | one `stopped` event total for two in-flight pauses |
 | `pause` on an already-suspended thread | emits **nothing** — fully idempotent |
+| Debuggee finishing | `terminated` only — **`exited` is never sent**, so the exit code can only come from the process we spawned |
 
 Spec defaults worth remembering, since they are not uniform:
 `StoppedEvent.allThreadsStopped` missing means *only* that thread stopped, but
@@ -607,28 +742,56 @@ generic "absent is false" helper gets the second one backwards.
 
 ## 9. Open
 
-- Does `request()` raise on `success == False`, or return the failed response?
-  (Concurrency makes silent attribution of errors worse, which argues for
-  raising.)
 - What `Resumption` looks like at the prompt in non-stop mode, and whether
   there is an explicit `wait(tid)` command alongside it.
-- Reverse requests (adapter→client) currently have no handler; the correct
-  behaviour is replying `success: false`, not crashing the reader.
 - Whether `before_prompt` becomes a real hook or stays out of the event model.
+- Who fills `SessionEnded.exit_code`. pydevd never sends `exited` (§8), so it can
+  only come from the process we spawned — which means the layer that owns the
+  child has to reach the ending, or the field stays None for a normal exit.
 - Stdin passthrough is still scoped to a blocking resume wait; it needs the
   foreground/background model and a single-owner terminal in Console. `doc/io_model.md`
   still describes the old mechanism.
 - `cont(all=...)` has no meaning in all-stop, since pydevd discards the
   `threadId`. It must refuse rather than silently no-op.
+- **Composite commands.** `until()` was a temporary breakpoint, a `cont()` and a
+  clear — three round trips presented as one command, and it was removed rather
+  than kept working by accident. What such a command means when it is
+  interrupted halfway, and who owns the state it leaves behind, needs deciding
+  before any of them come back.
 
-### Blocking defects in `client.py`
+### Not yet migrated
 
-Both prevent the mode wiring above from working at all:
+Layers 0–3 are built to this document. Layer 4 waits on the bus — the
+`wait_for_event`/`client.events`/`on_disconnect` call sites are gone, replaced
+by `_internal._resume()`, which arms a `bus.subscribe(Stopped)` before it sends
+the request that resumes — and reads through Session's guards.
 
-- `attach(**arguments)` passes the kwargs dict into the `__restart` positional of
-  `AttachRequestArguments`, so it ships as `{"restart": {...}}`. No attach
-  argument can currently be sent — including `stopAllThreadsOnSuspend` and
-  `steppingResumesAllThreads`.
-- `set_debugger_property()` takes no parameters (every field hardcoded `None`)
-  and returns `self.request(set_debugger_property)`, the method object —
-  `NameError` on call. This is the mid-session mode switch.
+The **thread control right** (§4) is built: `Session.ControlRights`, acquired in
+`_internal._resume()` — the single site every state-changing command routes
+through — and held from the send until the stop. `control()` is the same
+primitive held across a sequence. The key is the thread id, or `None` for every
+thread, which is already what a resume that names no thread passes, so nothing
+chooses between the two.
+
+What is still missing from §3, and matters to §4's guarantee, is that **the wait
+does not match on `threadId`**. In non-stop another thread's breakpoint
+satisfies a `cont()` on this one, and the right cannot prevent that — it
+serializes resumes of one thread, not attribution across threads. The match
+belongs with `resume()`/`Resumption`, because a matched wait in a blocking
+`cont()` would simply hang: nothing else announces the other thread's stop yet.
+
+Non-stop is otherwise half present too: the reducer and the thread table handle
+it, but `config.non_stop` does not exist, nothing sets
+`multiThreadsSingleNotification` or pins `steppingResumesAllThreads`, and
+`cont()` blocks unconditionally. `resume()` and `Resumption` are unwritten.
+pydevd's default is non-stop, so that is the mode we currently run in by
+accident rather than by choice.
+
+One ordering constraint the escape hatch has in practice: the right is taken
+before the resume request is sent, so a `pause` racing the send arrives while
+the thread is still suspended and, per §8, emits nothing — leaving the run
+unbounded. Anything automating "resume, then interrupt" must wait for the
+`continued` event, not for the right to change hands.
+
+`pdvp/dap/test/test_dap_client.py` tests the deleted API and is superseded by
+`test_client_events.py`.

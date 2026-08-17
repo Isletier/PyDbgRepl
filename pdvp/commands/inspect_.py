@@ -3,38 +3,40 @@ from .. import dap as _dap
 from ..session import SESSION
 from . import _internal
 from pdvp.model import CompletionList, Error, ExceptionInfo, Scope, Status
-from ._internal import _ensure_dap_paused
 
 __all__ = [
     "p", "locals", "globals_", "setvar", "whatis",
     "display", "undisplay", "exception_info", "completions",
 ]
 
+# Everything here reads through a frame, so everything here goes through
+# SESSION.require_frame(): the thread must be stopped *and* the handle must
+# still be at the epoch it was minted in. pydevd checks neither -- against a
+# running thread it answers with a torn stack and an empty variables list.
+
 
 def p(expression: str) -> Status | Error:
     """Evaluate `expression` in the current frame and return the result."""
-    err = _ensure_dap_paused()
-    if err is not None:
-        return err
+    frame = SESSION.require_frame()
+    if isinstance(frame, Error):
+        return frame
 
     try:
-        result = SESSION.client.evaluate(expression, frame_id=SESSION.current_frame_id, context="repl")
+        result = SESSION.client.evaluate(expression, frame_id=frame.frame_id, context="repl")
     except _dap.DAPError as e:
         return Error(str(e))
-    return Status(result["result"])
+    return Status(result.body.result)
 
 
 def _scope(scope_name: str) -> Scope | Error:
-    err = _ensure_dap_paused()
-    if err is not None:
-        return err
-    if SESSION.current_frame_id is None:
-        return Error("no current frame (use bt())")
+    frame = SESSION.require_frame()
+    if isinstance(frame, Error):
+        return frame
 
-    for scope in SESSION.client.scopes(SESSION.current_frame_id)["scopes"]:
+    for scope in SESSION.client.scopes(frame.frame_id).body.scopes:
         if scope["name"] != scope_name:
             continue
-        return Scope(SESSION.client.variables(scope["variablesReference"])["variables"])
+        return Scope(SESSION.client.variables(scope["variablesReference"]).body.variables)
     return Scope()
 
 
@@ -50,12 +52,12 @@ def globals_() -> Scope | Error:
 
 def setvar(name: str, value: str) -> Status | Error:
     """Assign `value` (a Python expression) to variable `name` in the current frame."""
-    err = _ensure_dap_paused()
-    if err is not None:
-        return err
+    frame = SESSION.require_frame()
+    if isinstance(frame, Error):
+        return frame
 
     try:
-        SESSION.client.evaluate(f"{name} = {value}", frame_id=SESSION.current_frame_id, context="repl")
+        SESSION.client.evaluate(f"{name} = {value}", frame_id=frame.frame_id, context="repl")
     except _dap.DAPError as e:
         return Error(str(e))
     return Status(f"{name} = {value}")
@@ -63,15 +65,15 @@ def setvar(name: str, value: str) -> Status | Error:
 
 def whatis(expression: str) -> Status | Error:
     """The type of `expression`, evaluated in the current frame."""
-    err = _ensure_dap_paused()
-    if err is not None:
-        return err
+    frame = SESSION.require_frame()
+    if isinstance(frame, Error):
+        return frame
 
     try:
-        result = SESSION.client.evaluate(expression, frame_id=SESSION.current_frame_id, context="hover")
+        result = SESSION.client.evaluate(expression, frame_id=frame.frame_id, context="hover")
     except _dap.DAPError as e:
         return Error(str(e))
-    return Status(result.get("type", "?"))
+    return Status(result.body.type or "?")
 
 
 def display(expression: str) -> Status:
@@ -79,7 +81,7 @@ def display(expression: str) -> Status:
     display_id = max((d["id"] for d in SESSION.displays), default=0) + 1
     SESSION.displays.append({"id": display_id, "expr": expression})
     lines = [f"{display_id}: {expression}"]
-    if SESSION.client is not None and not SESSION.running:
+    if SESSION.is_stopped(SESSION.current_thread_id):
         lines.append(_show_display(SESSION.displays[-1]))
     return Status("\n".join(lines))
 
@@ -98,7 +100,7 @@ def _show_display(d: dict) -> str:
         result = SESSION.client.evaluate(d["expr"], frame_id=SESSION.current_frame_id, context="repl")
     except _dap.DAPError as e:
         return f"{d['id']}: {d['expr']} = <error: {e}>"
-    return f"{d['id']}: {d['expr']} = {result['result']}"
+    return f"{d['id']}: {d['expr']} = {result.body.result}"
 
 
 def exception_info() -> ExceptionInfo | Error:
@@ -121,15 +123,15 @@ def completions(text: str, column: int) -> CompletionList | Error:
     Backing for future REPL tab-completion (see completion_design.md); not
     normally called directly.
     """
-    err = _ensure_dap_paused()
-    if err is not None:
-        return err
+    frame = SESSION.require_frame()
+    if isinstance(frame, Error):
+        return frame
 
     try:
-        result = SESSION.client.completions(text, column, frame_id=SESSION.current_frame_id)
+        result = SESSION.client.completions(text, column, frame_id=frame.frame_id)
     except _dap.DAPError as e:
         return Error(str(e))
-    return CompletionList(result.get("targets", []))
+    return CompletionList(result.body.targets)
 
 
 def _on_stopped(reason: str | None, top: dict | None) -> str | None:

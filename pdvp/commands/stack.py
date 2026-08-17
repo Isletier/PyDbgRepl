@@ -1,17 +1,21 @@
 """Thread and stack-frame navigation: threads, thread, bt, frame, up, down."""
 from ..session import SESSION
 from pdvp.model import Error, FrameRef, FrameList, Status, ThreadList
-from ._internal import _ensure_thread_paused
+from ._internal import _ensure_connected, _ensure_thread_paused
 
 __all__ = ["threads", "thread", "bt", "frame", "up", "down"]
 
 
 def threads() -> ThreadList | Error:
     """List threads. Picks a current thread if none is selected yet."""
-    if SESSION.client is None:
-        return Error("not connected")
+    err = _ensure_connected()
+    if err is not None:
+        return err
 
-    thread_list = SESSION.client.threads()["threads"]
+    thread_list = SESSION.client.threads().body.threads
+    # The reducer may not issue requests, so the round trip that could refresh
+    # the thread table has to feed the answer back from here.
+    SESSION.adopt_threads(thread_list)
 
     if SESSION.current_thread_id is None and thread_list:
         SESSION.current_thread_id = thread_list[0]["id"]
@@ -20,11 +24,12 @@ def threads() -> ThreadList | Error:
 
 
 def thread(thread_id: int) -> Status | Error:
-    """Switch the current thread."""
-    if SESSION.client is None:
-        return Error("not connected")
+    """Switch the current thread. Clears the frame cursor -- a frame from the
+    old thread means nothing against the new one."""
+    err = _ensure_connected()
+    if err is not None:
+        return err
     SESSION.current_thread_id = thread_id
-    SESSION.current_frame_id = None
     return Status(f"current thread is now {thread_id}")
 
 
@@ -35,7 +40,7 @@ def bt(levels: int | None = None) -> FrameList | Error:
         return err
 
     trace = SESSION.client.stack_trace(SESSION.current_thread_id, levels=levels)
-    frames = trace["stackFrames"]
+    frames = trace.body.stackFrames
 
     if SESSION.current_frame_id is None and frames:
         SESSION.current_frame_id = frames[0]["id"]
@@ -49,7 +54,7 @@ def frame(index: int) -> FrameRef | Error:
     if err is not None:
         return err
 
-    frames = SESSION.client.stack_trace(SESSION.current_thread_id)["stackFrames"]
+    frames = SESSION.client.stack_trace(SESSION.current_thread_id).body.stackFrames
     if not (0 <= index < len(frames)):
         return Error(f"no frame {index}")
 
@@ -63,7 +68,7 @@ def _move_frame(delta: int) -> FrameRef | Error:
     if err is not None:
         return err
 
-    frames = SESSION.client.stack_trace(SESSION.current_thread_id)["stackFrames"]
+    frames = SESSION.client.stack_trace(SESSION.current_thread_id).body.stackFrames
     if not frames:
         return Error("no frames")
 

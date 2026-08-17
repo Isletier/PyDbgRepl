@@ -68,7 +68,8 @@ def process_args_envs(argv: list[str] | None = None) -> None:
 
 def _sigint_handler(signum, frame) -> None:
     """gdb-style Ctrl+C: pause a running debuggee, otherwise cancel the current input."""
-    if SESSION.client is not None and SESSION.running and SESSION.current_thread_id is not None:
+    thread_id = SESSION.current_thread_id
+    if SESSION.client is not None and thread_id is not None and not SESSION.is_stopped(thread_id):
         try:
             _commands.interrupt()
         except _dap.DAPError:
@@ -96,7 +97,7 @@ class _PydevPromptStyle:
     def in_prompt(self):
         if SESSION.client is None:
             status = "disconnected"
-        elif SESSION.running:
+        elif SESSION.any_running:
             status = "running"
         else:
             status = "paused"
