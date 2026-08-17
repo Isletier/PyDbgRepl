@@ -37,6 +37,55 @@ class event_name(StrEnum):
     INVALIDATED     = "invalidated",
     MEMORY          = "memory"
 
+class responce_holder:
+    def __init__(self):
+        self.event: threading.Event = threading.Event()
+        self.responce: schema.Response | None = None
+
+    def get(self):
+        self.event.wait()
+        return self.responce
+
+    def set(self, responce: schema.Response):
+        self.responce = responce
+        self.event.set()
+        return
+
+
+class responce_registry:
+    def __init__(self):
+        self.registry: dict[int, responce_holder] = {}
+        self.registry_lock = threading.Lock()
+
+    def register(self, seq: int) -> responce_holder:
+        holder: responce_holder = responce_holder()
+        with self.registry_lock:
+            self.registry[seq] = holder
+        return holder
+
+    def put(self, responce: schema.Response):
+        with self.registry_lock:
+            self.registry[responce.request_seq].set(responce)
+        return
+
+
+class request_holder:
+    def __init__(self, registry: responce_registry):
+        self._seq: int = 0
+        self._seq_lock: threading.Lock = threading.Lock()
+        self._resp_registry: responce_registry = registry
+
+    def __enter__(self) -> [int, responce_holder]:
+        self._seq_lock.acquire(True)
+        self._seq += 1
+        responce_holder = self._resp_registry.register(self._seq)
+        return (self._seq, responce_holder)
+
+    def __exit__(self, some, some1, some2):
+        self._seq_lock.release()
+        return True
+
+
 class Client:
     def __init__(self, transport: Transport):
         """Take over an already-connected `transport`.
@@ -49,14 +98,11 @@ class Client:
         the caller is the only one still holding it.
 
         """
+
+        self._resp_registry: responce_registry = responce_registry()
+        self._req_seq: request_holder = request_holder(self._resp_registry)
+
         self._transport = transport
-
-        self._seq = 0
-        self._seq_lock = threading.Lock()
-
-        self._pending: dict[int, tuple[threading.Event, schema.Response | None]] = {}
-        self._pending_lock = threading.Lock()
-
         self.events: queue.Queue[dict] = queue.Queue()
         self.on_event: Callable[[dict], None] | None = None
 
@@ -69,69 +115,48 @@ class Client:
         if self.on_disconnect is not None:
             self.on_disconnect()
 
-        # shutdown -> join -> close. The join is skipped when close() is
-        # called from the reader itself, as on_disconnect handlers can be.
         self._transport.shutdown()
         if threading.current_thread() is not self._reader_thread:
             self._reader_thread.join(READER_JOIN_TIMEOUT)
         self._transport.close()
 
-    def _next_seq(self) -> int:
-        with self._seq_lock:
-            self._seq += 1
-            return self._seq
-
     def _read_loop(self) -> None:
-        while True:
-            try:
+        try:
+            while True:
                 responce_str = self._transport.recv().decode("utf-8")
                 print(responce_str)
-            except OSError:
-                # EOF, reset, or a socket closed under us by close().
-                return
-            except ProtocolError as e:
-                print(f"*** dropping pydevd connection: {e}")
-                return
+                message : schema.ProtocolMessage = base_schema.from_json(responce_str)
 
-            message : schema.ProtocolMessage = base_schema.from_json(responce_str)
-
-            if message.type == "response":
-                self._handle_response(message)
-            elif message.type == "event":
-                self.events.put(message)
-                if self.on_event is not None:
-                    self.on_event(message)
-            else:
-                raise DAPError()
-
-    def _handle_response(self, responce: schema.Response) -> None:
-        # a server side seq handling should be processed
-        with self._pending_lock:
-            event, _ = self._pending.get(responce.request_seq, None)
-            self._pending[responce.request_seq] = responce
-            event.set()
+                if message.type == "response":
+                    self._resp_registry.put(responce)
+                elif message.type == "event":
+                    self.events.put(message)
+                    if self.on_event is not None:
+                        self.on_event(message)
+                else:
+                    raise ProtocolError()
+        except OSError:
+            self.close()
+            return
+        except ProtocolError:
+            self.close()
+            return
 
 
-    def request(self, request: schema.Request, timeout: float | None = None) -> schema.Response:
+    def request(self, request: schema.Request) -> schema.Response:
         """Send a request and block for its response body. Raises DAPError on failure/timeout."""
-        request.seq = self._next_seq()
 
-        event = threading.Event()
-        with self._pending_lock:
-            self._pending[request.seq] = (event, None)
+        with self._req_seq as (seq, responce_holder):
+            request.seq = seq
+            request_str = request.to_json().encode("utf-8")
+            print(request_str)
+            self._transport.send(request_str)
 
-        request_str = request.to_json().encode("utf-8")
-        print(request_str)
-        self._transport.send(request_str)
+        responce = responce_holder.get()
+        if responce == None:
+            raise DAPError()
 
-        if not event.wait(timeout):
-            raise DAPError(f"timed out waiting for response to '{command}'")
-
-        with self._pending_lock:
-            resp: schema.Response = self._pending.pop(request.seq, None)
-
-        assert(resp != None)
-        return resp
+        return responce
 
     def wait_for_event(self, event_name: event_name, timeout: float | None = None) -> schema.Event:
         """Block until an event named `event_name` arrives. Other events are kept in order.
