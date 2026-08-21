@@ -12,7 +12,7 @@ from pathlib import Path
 from pdvp.dap.client import Client
 import pdvp.schema.pydevd_schema as schema
 
-from ._internal import _current_file
+from .location import current_file
 
 
 __all__ = [
@@ -35,19 +35,6 @@ def commit_all() -> None:
         commit_source_breakpoints(source)
 
     commit_function_breakpoints()
-
-    return
-
-
-def invalidate_all() -> None:
-    """Forget what the (now dead) pydevd session told us about our breakpoints.
-
-    The breakpoints themselves survive teardown, gdb-style, but `verified` is
-    a fact about one debuggee process rather than about the breakpoint itself,
-    so it goes back to False. Called from _clear_dap_state().
-    """
-    for breakp in SESSION.Breakpoints.values():
-        breakp.verified = False
 
     return
 
@@ -100,7 +87,7 @@ def commit_source_breakpoints(path: model.SourcePath):
 def sbreak(*args, condition: str | None = None, hit_condition: str | None = None, log_message: str | None = None) -> model.SourceBreakpoint:
     match args:
         case [int(line)]:
-            path = _current_file()
+            path = current_file()
             if path is None:
                 raise model.PDVPError("no current file (pass an explicit path)")
         case [str(path), int(line)]:

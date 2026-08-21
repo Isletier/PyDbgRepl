@@ -470,6 +470,17 @@ class Client:
         ))
         return self.request(pause_req)
 
+    def pause_async(self, thread_id: int) -> Pending:
+        """`pause` without waiting for the reply.
+
+        What ends a blocked resume is the `stopped` event, not this response,
+        so interrupt() has nothing to gain by waiting -- and must not wait, since
+        it runs in a signal handler on the very thread it would be blocking.
+        """
+        return self.send(schema.PauseRequest(arguments=schema.PauseArguments(
+            thread_id
+        )))
+
     # ---- inspection
 
     def threads(self) -> schema.ThreadsResponse:

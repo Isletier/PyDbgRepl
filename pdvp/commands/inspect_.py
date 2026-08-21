@@ -1,7 +1,7 @@
 """Inspection: p, locals, globals_, setvar, whatis, display/undisplay, exception_info, completions."""
 from .. import dap as _dap
 from ..session import SESSION
-from . import _internal
+from . import execution
 from pdvp.model import CompletionList, Error, ExceptionInfo, Scope, Status
 
 __all__ = [
@@ -103,14 +103,15 @@ def _show_display(d: dict) -> str:
     return f"{d['id']}: {d['expr']} = {result.body.result}"
 
 
-def exception_info() -> ExceptionInfo | Error:
-    """Details of the exception that stopped the current thread, if any."""
-    err = _internal._ensure_thread_paused()
+def exception_info(*, thread: int | None = None) -> ExceptionInfo | Error:
+    """Details of the exception that stopped `thread`, defaulting to the current one."""
+    thread_id = SESSION.resolve_thread(thread)
+    err = SESSION.require_stopped(thread_id)
     if err is not None:
         return err
 
     try:
-        info = SESSION.client.exception_info(SESSION.current_thread_id)
+        info = SESSION.client.exception_info(thread_id)
     except _dap.DAPError as e:
         return Error(str(e))
 
@@ -134,10 +135,11 @@ def completions(text: str, column: int) -> CompletionList | Error:
     return CompletionList(result.body.targets)
 
 
-def _on_stopped(reason: str | None, top: dict | None) -> str | None:
+def _display_lines(reason: str | None, top: dict | None) -> str | None:
+    """The display() expressions, re-evaluated, as part of the stop's own report."""
     if not SESSION.displays:
         return None
     return "\n".join(_show_display(d) for d in SESSION.displays)
 
 
-_internal.post_stop_hooks.append(_on_stopped)
+execution.stop_report_lines.append(_display_lines)

@@ -1,25 +1,43 @@
-"""Session lifecycle: run, stop, connect, disconnect, terminate, restart."""
+"""Session lifecycle: run, stop, connect, disconnect, terminate, restart.
+
+Also the home of `_dispatch`, the sink the Client is constructed with here.
+Session does the reduction and the publishing; what belongs to the command
+layer is deciding what to do about an outcome nobody is waiting for.
+"""
 import contextlib
 import threading
-import time
-
-from pdvp.commands.breakpoints import commit_all
 
 from .. import dap as _dap
 from .. import events
 from pdvp import launch
 from ..config import CONFIG
+from ..console import print_async, pump_output
 from ..session import SESSION
 from pdvp.model import Error, Status, StopResult
-from ._internal import (
-    _clear_dap_state,
-    _dispatch,
-    _end_session,
-    _resume,
-    _stream_output,
-)
+from .breakpoints import commit_all
+from .execution import describe_thread, resume
 
 __all__ = ["run", "stop", "connect", "disconnect", "terminate", "restart"]
+
+
+def _dispatch(message) -> None:
+    """The Client's `on_event` sink. Runs on the reader thread."""
+    event = SESSION.reduce(message)
+
+    if isinstance(event, events.Stopped) and not SESSION.stop_is_awaited(event):
+        # Nobody's wait will report this one -- in non-stop it is the normal way
+        # a second thread announces a breakpoint. No location: we are on the
+        # reader thread, which may not issue requests.
+        print_async(f"*** {describe_thread(event.thread_id)} stopped ({event.reason})")
+        return
+
+    if (isinstance(message, _dap.ConnectionClosed)
+            and not message.deliberate
+            and not SESSION.awaiting_resume):
+        # Nobody is blocked in a resume to notice and tear the session down, so
+        # do it here and say so.
+        SESSION.end()
+        print_async("*** connection to pydevd lost")
 
 
 def run(
@@ -99,7 +117,7 @@ def _run(
 
         if SESSION.process.master_fd is not None:
             SESSION.reader_thread = threading.Thread(
-                target=_stream_output, args=(SESSION.process.master_fd,), daemon=True
+                target=pump_output, args=(SESSION.process.master_fd,), daemon=True
             )
             SESSION.reader_thread.start()
 
@@ -127,7 +145,7 @@ def _stop_session() -> None:
         except _dap.DAPError:
             pass
 
-    _end_session()
+    SESSION.end()
 
 
 def stop() -> Status | Error:
@@ -193,17 +211,27 @@ def _handshake(client, prefix_lines: list[str], pid: int | None = None) -> StopR
     # caused it, so arm first and trigger second.
     with SESSION.bus.subscribe(events.Initialized) as initialized:
         _check_capabilities(client.initialize())
-        client.attach()
+        client.attach(
+            # The mode, and the one flag that would otherwise produce neither
+            # mode. steppingResumesAllThreads defaults to True and has no
+            # setDebuggerProperty path, so left alone it gives us breakpoints
+            # that stop one thread and steps that resume everything. Pinning it
+            # costs nothing in all-stop, where every thread is already suspended.
+            stopAllThreadsOnSuspend=not CONFIG.non_stop,
+            steppingResumesAllThreads=False,
+        )
         if not isinstance(initialized.get(), events.Initialized):
-            _end_session()
+            SESSION.end()
             return Error("pydevd went away during the handshake")
+
+    SESSION.non_stop = CONFIG.non_stop
 
     commit_all()
 
     # configurationDone() resumes the debuggee; block for its first stop
     # (initial breakpoint) or exit, same as cont()/step() etc. No thread id --
     # nothing has stopped yet, so there is nothing to bump.
-    return _resume(None, lambda c: c.configuration_done(), prefix="\n".join(prefix_lines))
+    return resume(None, lambda c: c.configuration_done(), prefix="\n".join(prefix_lines))
 
 
 def disconnect() -> Status | Error:
@@ -217,7 +245,7 @@ def disconnect() -> Status | Error:
     except _dap.DAPError:
         pass
     client.close()
-    _clear_dap_state()
+    SESSION.end_connection()
     return Status("disconnected")
 
 

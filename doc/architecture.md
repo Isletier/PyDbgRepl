@@ -19,7 +19,7 @@ something — is a design error, not a special case.
 
 **P1 — DAP is asynchronous; pdvp's synchrony is a policy, not a foundation.**
 Every layer below the command surface is async. Blocking lives in exactly one
-place: a helper the command layer calls when the execution mode says to. No
+place: a helper the command layer calls when the caller asks it to (§3). No
 lower layer knows whether the caller intends to wait.
 
 **P2 — Each layer speaks one vocabulary and has exactly one consumer above it.**
@@ -262,6 +262,15 @@ means — and two user threads calling `frame()` would simply race.
 Context-local is what lets P0 hold without a "may not move the cursor" rule:
 every caller gets the full API because every caller has its own cursor.
 
+A context that has never set one — a worker thread, a subscription drainer —
+reads through to a session-wide default: **the last thread to stop**. Setting a
+cursor detaches that context from the default permanently. This is not a
+convenience: the REPL's own context never sets a cursor explicitly either, so
+without the fallback the human would have to type `thread(1)` before their first
+`cont()`. It applies to state-changing commands for the same reason. P0 holds
+because nobody is privileged — every context that has not chosen sees the same
+default.
+
 Switching threads clears the frame cursor unconditionally: a frame handle from
 thread A is meaningless once B is selected, independent of running/stopped.
 
@@ -483,25 +492,115 @@ be an implementation excuse, not a design.
 |---|---|---|
 | Breakpoint hit | all threads suspend | only the hitting thread |
 | `stopped` event | one, `allThreadsStopped: true` | one per thread, `allThreadsStopped: false` |
-| `cont()` | resumes everything, **blocks** until the next stop | resumes one thread, **returns immediately** |
+| `cont()` | resumes everything | resumes only that thread; the rest keep running |
 | stepping | one thread steps, others stay parked | same |
-| Prompt | reachable only when fully stopped | always reachable |
+| Prompt | reachable only when fully stopped | reachable while other threads run |
 | Epoch bump | all threads | the resumed thread |
 
-Non-stop is incompatible with a blocking `cont()`: if `cont()` blocks, you cannot
-touch the other suspended threads while one runs, which is the entire point of
-the mode. gdb resolves this the same way — in non-stop, `continue` returns to the
-prompt immediately and stops are announced asynchronously.
+### Who decides whether a resume blocks
 
-This is what makes P1 non-negotiable. The commands themselves are not
-synchronous in one of the two modes, so synchrony cannot be built into anything
-below them.
+**The caller, not the mode.** `cont()`, `step()`, `next()`, `finish()` and
+`jump()` block until the thread they named stops, in *both* modes;
+`cont(wait=False)` returns a `Resumption` to `.wait()` on later, in both modes.
+
+These are two independent axes and this document previously conflated them. The
+mode decides **what stops**; the caller decides **whether the command returns**.
+gdb keeps them separate too: in non-stop a plain `continue` still blocks until
+the current thread stops, and background execution is asked for explicitly with
+`continue &` / `step &`. `cont(wait=False)` is that `&`.
+
+The rejected alternative was letting the mode decide both — non-stop implying a
+non-blocking `cont()`. Its justification is that a blocking `cont()` stops you
+touching the other suspended threads while one runs, and that presumes a
+controller with something else to do while blocked. The human at the prompt has
+nothing else to do: they can only type one command at a time. The capability is
+real only for a second actor, or for someone who genuinely wants several threads
+in flight at once — and that is precisely the caller who can ask for it.
+
+The constraint underneath is the frontend, and it is the same one that decides
+§4. An IDE's Continue button can afford to be fully asynchronous because a GUI
+has many output streams to carry the resulting state; a REPL has one, so
+asynchrony there reads as output arriving from nowhere. We are tied to REPL
+machinery by design, so synchronous is the default and asynchrony is opt-in.
+
+Non-stop keeps what it is actually for: other threads keep running while you are
+blocked, hit their own breakpoints independently, and announce those stops
+through the bus (§2, Console) rather than freezing until you are done.
+
+This is what makes P1 non-negotiable. Whether a command is synchronous is
+decided per call, so synchrony cannot be built into anything below the command
+layer.
+
+### The one command-layer decision point
+
+```
+resume(thread_id, request, wait=True) -> StopResult | Resumption
+```
+
+`wait=True` returns a resolved `StopResult`; `wait=False` returns a `Resumption`.
+`cont()`, `step()`, `next()`, `finish()`, `jump()` and the
+post-`configurationDone` initial stop all route through it. One place knows about
+the mode, and the mode no longer decides the return type — the argument does.
+
+The wait must **always** match on `threadId`. In non-stop another thread's
+breakpoint would otherwise satisfy a `cont()` on this one, reporting the wrong
+location and leaving the intended thread still running. Since blocking is no
+longer mode-dependent, neither is the match: it is required on every wait, in
+every mode.
+
+### Where the cursor lands after a stop
+
+**The cursor moves to the thread whose stop resolved the caller's own wait, and
+nothing else moves it.** One rule, two different-looking outcomes:
+
+- **all-stop** — the resume affected every thread, so whichever thread stopped is
+  the one this caller was waiting for, and the cursor follows it there. The
+  switch is **announced** when it actually changed threads, the way gdb prints
+  "[Switching to Thread N]". Without that the report describes thread 5's frame
+  while the cursor still points at thread 2, and the caller's next `bt()`
+  contradicts the line they just read.
+- **non-stop** — the wait matches on `threadId`, so only the named thread's stop
+  resolves it and the cursor never moves somewhere the caller did not ask to go.
+  Another thread hitting a breakpoint meanwhile is announced (§2, Console) and
+  followed up with an explicit `thread(5)` if the caller cares.
+- **`wait=False`** — nothing resolved, so nothing moves. The cursor moves if and
+  when the `Resumption` is waited on.
+
+Since the cursor is context-local (§2), this only ever moves the cursor of the
+context that made the call. A stop nobody was waiting for moves no cursor at all.
+
+The frame cursor always resets to the new top frame, in every case: frame handles
+are epoch-scoped (P6) and the resume that just ended invalidated the old one.
+
+### Interrupt
+
+One rule, and it does not branch on the mode: **`interrupt()` pauses every
+thread we believe is running.**
+
+- In all-stop that is redundant in principle — pausing any single thread
+  suspends everything — but it is what makes it *robust*. pydevd's pause is
+  tracer-based (§8), so a thread parked in a C-level call never suspends;
+  "pause the one thread you picked" can therefore silently do nothing. Pausing
+  all of them means any one of them landing stops the world.
+- In non-stop it is stop-the-world, which is the only sensible reading: there is
+  no single "current run" to interrupt.
+- Pause's idempotence (§8) carries both — the requests that hit already-suspended
+  threads emit nothing.
+
+Ctrl+C routes here only when **something is running**, which in non-stop means
+any thread, not merely a resume this context is blocked in. At an idle prompt it
+stays the REPL's line-clear.
+
+`interrupt()` is also what establishes "no resume we initiated is in flight",
+which is the precondition for switching into all-stop below.
 
 ### Wiring
 
 Mode is `config.non_stop`, applied at attach:
 
-- `multiThreadsSingleNotification = not non_stop`
+- `stopAllThreadsOnSuspend = not non_stop` — the attach-argument spelling;
+  `multiThreadsSingleNotification` is the `setDebuggerProperty` spelling of the
+  same `py_db` field and is *not* read from attach arguments (§8)
 - `steppingResumesAllThreads = False` — **always pinned**
 
 The second flag needs pinning because it defaults to `True` and has no
@@ -511,24 +610,28 @@ mode. Pinning it to `False` costs nothing in all-stop, where every thread is
 already suspended, so per-thread stepping is indistinguishable from all-thread
 stepping.
 
-That leaves `multiThreadsSingleNotification` as the single user-facing switch,
-and it *is* toggleable mid-session via `setDebuggerProperty` — better than gdb,
-which makes you decide before running.
+That leaves the mode as the single user-facing switch, and it *is* toggleable
+mid-session via `setDebuggerProperty` — better than gdb, which makes you decide
+before running.
 
-### The one command-layer decision point
+### Switching modes
 
-```
-resume(thread_id, request) -> StopResult | Resumption
-```
+The precondition is **no resume we initiated is in flight**. It is deliberately
+not "every thread is suspended": a thread blocked in a C-level call never
+suspends (§8), so that spelling would make any program calling `join()` unable
+to switch modes for its whole life. A thread we did not resume and cannot pause
+is not a hazard to the change — it is not ours to stop.
 
-All-stop returns a resolved `StopResult`; non-stop returns a `Resumption` the
-user can `.wait()` on later. `cont()`, `step()`, `next()`, `finish()`, `jump()`
-and the post-`configurationDone` initial stop all route through it. One place
-knows about the mode.
+That makes mode the first setting that cannot stay a plain `config.non_stop = True`
+once connected, because an assignment cannot refuse. Before `run()` it is a
+config field; after, it is a command that can return an `Error`.
 
-The wait must match on `threadId`. In non-stop, another thread's breakpoint would
-otherwise satisfy a `cont()` on this one, reporting the wrong location and
-leaving the intended thread still running.
+The command is two steps, not one: set the property, then **re-commit every
+breakpoint**. pydevd stamps each breakpoint's suspend policy from the mode at
+`setBreakpoints` time (§8), so breakpoints installed before the flip keep the
+old behaviour and produce a hybrid — new stops reported one way, old breakpoints
+suspending the other. `commit_all()` already does the second half. None of this
+reaches the command surface; it is what the one command does internally.
 
 ---
 
@@ -559,10 +662,11 @@ With the right, N continues become N serialized runs.
 
 ### Shape
 
-- Acquired by every state-changing operation, held from the send **until the
-  resulting stop**.
-- **`pause` is exempt.** Measured (§8): pause is idempotent — a second pause on
-  an already-suspended thread emits nothing at all — so it cannot corrupt another
+- Acquired by every state-changing operation, from before the send; how long it
+  is held depends on whether the caller waits (below).
+- **`pause` is exempt.** Ending somebody else's run is precisely its job (§3,
+  Interrupt), and measured (§8) it is idempotent — a second pause on an
+  already-suspended thread emits nothing at all — so it cannot corrupt another
   caller's armed subscription. The exemption is what keeps Ctrl+C working and is the
   escape hatch when one caller's long run is making another wait.
 - Reads and state-independent operations never touch it.
@@ -570,13 +674,24 @@ With the right, N continues become N serialized runs.
   deadlock is possible, because the holder is woken by the reader thread (§2,
   two delivery paths) — nothing the right blocks is needed to release it.
 
-**Scope follows the mode**, which is a consequence rather than a special case:
+**The key follows the mode; the duration follows the call.** Both are
+consequences rather than special cases:
 
-- **non-stop** — a resume affects one thread, so the right is per-thread; and
-  since `cont()` does not block there, it is held only across the send.
-  Contention is negligible.
-- **all-stop** — a resume affects everything, so the right is global and held
-  across the entire run. Which is precisely what all-stop means.
+- **non-stop** — a resume affects one thread, so the key is that thread's id.
+- **all-stop** — a resume affects everything, so the key is `None`, which is
+  already what a resume naming no thread passes. Nothing chooses between the
+  two spellings.
+- **`wait=True`** — held from the send until the stop, so the run is the unit
+  that is serialized. This is the case that matters: N continues become N
+  serialized runs instead of one run reported as N successes.
+- **`wait=False`** — held only across the send. That still earns its keep: it
+  makes the second caller's request provably arrive while the first thread is
+  already moving, so pydevd refuses it loudly instead of accepting a
+  near-simultaneous duplicate as a no-op success.
+
+Because blocking is the caller's choice rather than the mode's (§3), the right
+has the same meaning in both modes — it does not degenerate into an all-stop
+mechanism.
 
 ### Sequence atomicity
 
@@ -620,6 +735,54 @@ pleasant". Two things meet it: a blocked acquisition must announce itself rather
 than hang mutely ("waiting for control of thread 2"), and Ctrl+C must remain the
 escape hatch — which it is, because `pause` bypasses the right, ends the holder's
 run, and releases it.
+
+### Rejected: durable thread ownership
+
+The alternative was for a claim to outlive the run: `thread(2)` takes ownership
+of thread 2 and keeps it until released, others get an error instead of a queue,
+and sequence atomicity comes free (so `control()` would not exist). It is the
+simpler concurrency story and it was rejected anyway, for two reasons.
+
+**It taxes the extension path.** Consider the smallest realistic automation: a
+subscriber that steps a few times when a breakpoint is hit. Under a per-run hold
+this needs nothing — the driver's hold ends at the stop, the subscriber's `step()`
+acquires and releases around itself, and the brief queue between them resolves in
+microseconds. Under durable ownership the same handler needs release machinery
+threaded back into whatever command started the run, plus an answer for how the
+human gets the thread back afterwards. The ceremony lands on exactly the code we
+want people to be able to write casually.
+
+**Blocking beats erroring for the pattern people actually write.** The objection
+to a queue is that a queued command was decided in a world that no longer exists
+by the time it runs. That is true of genuine contention — which §4 already
+classifies as a caller bug — and false of the common case, which is a *handoff at
+a stop*: the previous holder is already returning, so the wait is negligible and
+the world has not moved. Erroring there would force every handler into a retry
+loop for a right that is free by the time it retries.
+
+What the hold guarantees, then, is narrow and deliberate: it prevents the
+*silent* failure, two commands producing one run and reporting success to both.
+Past that we assume the person writing automation — the user themselves, or a
+plugin author they chose to trust — knows what their code does. That assumption
+is what licenses us to not build ownership, revocation, stealing, or a `release()`.
+
+### Automation and reporting
+
+Reaction to an event belongs on the bus (§2, Layer 3), and nowhere else. In
+particular **the stop report is not an extension point**: the hooks that
+contribute to a `StopResult`'s suffix exist to compose *that command's own
+output* — re-evaluated `display()` expressions, a temporary breakpoint's
+auto-clear line, both of which gdb also prints as part of the stop announcement.
+They are pure: they return a line or nothing, change no state, issue no requests.
+A callback list that fires on a stop looks like an event system and will attract
+uses that belong on the bus, so its name and contract have to say what it is.
+
+A subscriber that changes the program's state owns the reporting of what it did.
+Its output can otherwise land ahead of the blocked caller's own `StopResult` —
+it wakes when the event is published, which is before that caller returns — and
+a bare `print` collides with a half-typed prompt. The async-safe print that
+clears the line, writes, and redraws the prompt is therefore part of the public
+contract, not an internal detail.
 
 ---
 
@@ -705,10 +868,23 @@ transport keepalive.
 - Per-thread `(stopped, epoch)` table; single `running` bool deleted
 - Epoch-tagged handles, bumped at resume-send
 - Both execution modes supported; `steppingResumesAllThreads` pinned false
-- Cursor is context-local; every caller has the full API
+- The mode decides what stops; the **caller** decides whether the command
+  returns. `wait=True` everywhere by default, `wait=False` is gdb's `continue &`
+- The wait always matches on `threadId`, in every mode
+- The cursor follows the stop that resolved this caller's own wait, and nothing
+  else. In all-stop that can change threads, and the switch is announced
+- Cursor is context-local; every caller has the full API. A context that never
+  set one reads the last thread to stop
+- `interrupt()` pauses every thread believed to be running, in both modes — one
+  rule, and robust against threads pydevd's tracer cannot reach
 - `interrupt()` is fire-and-forget; the armed subscription resolves on `stopped`
 - Thread control right: implicit per state-changing command, explicitly holdable
-  via `control()`, `pause` exempt
+  via `control()`, `pause` exempt. Key follows the mode, duration follows the call
+- Durable per-thread ownership rejected: it taxes the extension path, and for a
+  handoff at a stop a queue beats an error
+- Mode switching requires no resume in flight — not "every thread suspended"
+- The stop report composes one command's output; it is not an extension point.
+  Reaction belongs on the bus, and a subscriber owns its own reporting
 - Frame-scoped reads gated on the stopped flag, separately from the epoch check
 - The reducer never issues requests; `Event.top_frame` is lazy
 
@@ -728,11 +904,13 @@ Observed against pydevd 3.5.0, not inferred from the spec. Reproducible with
 | `continue(tid)` in all-stop | **`tid` is discarded** — `on_continue_request` rewrites it to `"*"`, resumes everything, replies `allThreadsContinued: true`. No error, no warning |
 | all-stop attach key | `stopAllThreadsOnSuspend` — `multiThreadsSingleNotification` is the `setDebuggerProperty` spelling and is *not* read from attach arguments |
 | Stepping | resumes **all** threads — `steppingResumesAllThreads` defaults `True` on attach and has no `setDebuggerProperty` path |
-| `supportsSingleThreadExecutionRequests` | never advertised; the `singleThread` flag is ignored, granularity comes from the mode |
+| `supportsSingleThreadExecutionRequests` | never advertised; `singleThread` exists only in the generated schema and no handler reads it, so granularity comes from the mode and never from the request |
+| Breakpoint suspend policy | **stamped at `setBreakpoints` time** — `suspend_policy = "ALL" if py_db.multi_threads_single_notification else "NONE"` (`pydevd_process_net_command_json.py:767`, `:806`). Flipping the mode later does not revisit breakpoints already installed |
 | `stackTrace` on a running thread | **succeeds** with a torn snapshot (observed depths 1, 12, 1 on the same thread) |
 | `variables` on a running thread's frame | **succeeds, returns `[]`** — success-shaped garbage, no error |
 | Second `pause` while running | one `stopped` event total for two in-flight pauses |
 | `pause` on an already-suspended thread | emits **nothing** — fully idempotent |
+| `pause` on a thread parked in a C-level call | **never suspends** — pause is tracer-based, so a thread blocked in `join()`/`acquire()`/a blocking read is unreachable until it returns to Python |
 | Debuggee finishing | `terminated` only — **`exited` is never sent**, so the exit code can only come from the process we spawned |
 
 Spec defaults worth remembering, since they are not uniform:
@@ -742,8 +920,12 @@ generic "absent is false" helper gets the second one backwards.
 
 ## 9. Open
 
-- What `Resumption` looks like at the prompt in non-stop mode, and whether
-  there is an explicit `wait(tid)` command alongside it.
+- What `Resumption` looks like at the prompt, and whether there is an explicit
+  `wait(tid)` command alongside it. It is reachable in both modes now (§3), so
+  this is no longer a non-stop-only question.
+- Whether a stop that resolved nobody's wait needs anything beyond an
+  announcement — it moves no cursor, and in non-stop it is the normal way a
+  second thread reports a breakpoint.
 - Whether `before_prompt` becomes a real hook or stays out of the event model.
 - Who fills `SessionEnded.exit_code`. pydevd never sends `exited` (§8), so it can
   only come from the process we spawned — which means the layer that owns the
@@ -776,16 +958,30 @@ chooses between the two.
 What is still missing from §3, and matters to §4's guarantee, is that **the wait
 does not match on `threadId`**. In non-stop another thread's breakpoint
 satisfies a `cont()` on this one, and the right cannot prevent that — it
-serializes resumes of one thread, not attribution across threads. The match
-belongs with `resume()`/`Resumption`, because a matched wait in a blocking
-`cont()` would simply hang: nothing else announces the other thread's stop yet.
+serializes resumes of one thread, not attribution across threads. This is now
+unambiguous work rather than something coupled to an unbuilt mode: since
+blocking is the caller's choice and not the mode's, the match is required on
+every wait. It does need the async announcement of unmatched stops to land with
+it, or a matched wait would hang with the other thread's stop going nowhere.
 
-Non-stop is otherwise half present too: the reducer and the thread table handle
-it, but `config.non_stop` does not exist, nothing sets
-`multiThreadsSingleNotification` or pins `steppingResumesAllThreads`, and
-`cont()` blocks unconditionally. `resume()` and `Resumption` are unwritten.
-pydevd's default is non-stop, so that is the mode we currently run in by
-accident rather than by choice.
+The cursor rule is unwritten too: `_report_stopped()` assigns
+`current_thread_id` from whatever stopped, which is right for all-stop but not
+for a matched non-stop wait, and it never announces a switch. There is no
+session-wide "last thread to stop" default, so a context that never selected a
+thread gets an error where §2 says it should read through.
+
+Non-stop is otherwise half present: the reducer and the thread table handle it,
+but `config.non_stop` does not exist, nothing sets
+`multiThreadsSingleNotification` or pins `steppingResumesAllThreads`, there is no
+mode-switch command, and `cont()` blocks unconditionally with no `wait=`
+argument. `resume()` and `Resumption` are unwritten. pydevd's default is
+non-stop, so that is the mode we currently run in by accident rather than by
+choice.
+
+`interrupt()` still pauses only the caller's current thread, so it is neither
+stop-the-world nor robust: if that thread is parked in a C-level call (§8) the
+pause lands nowhere and the program keeps running. Ctrl+C also still routes on
+"is this context's thread stopped" rather than "is anything running".
 
 One ordering constraint the escape hatch has in practice: the right is taken
 before the resume request is sent, so a `pause` racing the send arrives while

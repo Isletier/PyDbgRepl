@@ -67,9 +67,14 @@ def process_args_envs(argv: list[str] | None = None) -> None:
 
 
 def _sigint_handler(signum, frame) -> None:
-    """gdb-style Ctrl+C: pause a running debuggee, otherwise cancel the current input."""
-    thread_id = SESSION.current_thread_id
-    if SESSION.client is not None and thread_id is not None and not SESSION.is_stopped(thread_id):
+    """gdb-style Ctrl+C: pause a running debuggee, otherwise cancel the current input.
+
+    The condition is "anything is running", not "the thread I am sitting on is
+    running": in non-stop a thread this context never selected can be the only
+    one moving, and Ctrl+C is stop-the-world in both modes. At an idle prompt
+    this stays the REPL's line-clear.
+    """
+    if SESSION.client is not None and SESSION.any_running:
         try:
             _commands.interrupt()
         except _dap.DAPError:

@@ -25,14 +25,18 @@ is not held at all, it is the epoch counter that makes stale handles detectable.
 """
 import contextlib
 import dataclasses
+import os
 import threading
-from contextvars import ContextVar
 
+from . import cursor
 from . import dap
 from . import events
 from . import launch
 from . import model
 from . import source
+# Cursor state lives with the cursor; re-exported because a FrameHandle is what
+# Session's read guards hand back.
+from .cursor import FrameHandle
 
 
 @dataclasses.dataclass
@@ -56,35 +60,31 @@ class ThreadState:
     pending_resume: bool = False
 
 
-@dataclasses.dataclass(frozen=True)
-class FrameHandle:
-    """A frame, plus the two things that decide whether it may still be read."""
+@dataclasses.dataclass
+class ResumeWait:
+    """One resume we issued and have not yet seen the end of.
 
-    thread_id: int
-    epoch: int
-    frame_id: int
+    `target` is the thread set the resume claimed -- a thread id in non-stop,
+    `None` (every thread) in all-stop, which is the same key the control right
+    uses. `blocking` says whether a caller is actually parked on the outcome,
+    as opposed to holding a `Resumption` they have not waited on yet. The two
+    answer different questions and neither implies the other: a stop is
+    announced on the console unless a *blocking* wait will report it, while
+    the mode switch is refused if *any* resume is still in flight.
+    """
 
+    target: int | None
+    blocking: bool
 
-# The cursor is context-local, not global: `frame()`, `up()`, `down()` and
-# thread selection change an implicit argument to the *caller's* next command.
-# A global cursor would let one consumer silently change what another's next
-# locals() means, and two user threads calling frame() would simply race.
-# ContextVars give each thread its own by construction.
-_cursor_thread: ContextVar[int | None] = ContextVar("pdvp_cursor_thread", default=None)
-_cursor_frame: ContextVar[FrameHandle | None] = ContextVar("pdvp_cursor_frame", default=None)
-
-# Identifies the holder of a control right. Context-local for the same reason
-# the cursor is: the holder of a sequence is whoever is running it, and each
-# thread gets its own token without anyone passing one around.
-_control_owner: ContextVar[object | None] = ContextVar("pdvp_control_owner", default=None)
+    def matches(self, event) -> bool:
+        """Whether `event` is the stop this resume was waiting for."""
+        return self.target is None or event.all_threads or event.thread_id == self.target
 
 
-def _owner() -> object:
-    token = _control_owner.get()
-    if token is None:
-        token = object()
-        _control_owner.set(token)
-    return token
+# Which caller is asking. Both the cursor table and the control right key on it,
+# so a sequence and the cursor it moves belong to the same caller by
+# construction. Replaceable in one place -- see pdvp/cursor.py.
+_owner = cursor.owner
 
 
 class ControlRights:
@@ -193,12 +193,23 @@ class Session:
         # lifetime reset: the caller blocked in a resume is woken by the
         # session ending and releases on its way out.
         self.control = ControlRights()
+        # The table is program lifetime; the selections in it are connection
+        # lifetime, and end_connection() empties it.
+        self.cursors = cursor.Cursors()
 
         # ---- connection lifetime: reset by end_connection() ----
         self.client: dap.Client | None = None
         # sourceReferences are only valid for one DAP session (per the spec),
         # so this map cannot outlive the connection.
         self.sourceMap = source.SourceMap()
+        # The live execution mode, negotiated at attach from config.non_stop.
+        # Connection lifetime because that is when it is agreed; the config
+        # field is what the next attach will ask for.
+        self.non_stop = False
+        # The session-wide cursor default: what a context that never selected a
+        # thread reads through to. Connection lifetime -- a thread id from a
+        # dead session names nothing.
+        self._last_stopped: int | None = None
 
         # ---- process lifetime: reset by end_process() ----
         self.process: launch.LaunchedProcess | None = None
@@ -213,19 +224,23 @@ class Session:
         # ---- frontend lifetime ----
         self.ptpython_active = False
 
-        # How many callers are blocked waiting for a resume to resolve. Not run
-        # state -- it answers "will somebody notice this ending", which decides
-        # whether the reducer has to announce a death itself.
-        self._resume_waiters = 0
+        # Resumes we issued that have not resolved. Not run state -- these
+        # answer "will somebody report this outcome", which is what decides
+        # whether the console has to announce a stop or a death itself.
+        self._resumes: list[ResumeWait] = []
 
     # ---------------------------------------------------------- the reducer
 
-    def reduce(self, message) -> None:
+    def reduce(self, message) -> events.Event:
         """`Client.on_event`. Runs on the reader thread. Issues no requests.
 
         Everything the core says reaches the bus through here, including its
         death: a `ConnectionClosed` record is not a DAP event, so it is
         translated rather than published as one.
+
+        Returns the event it published, so the caller on the reader thread can
+        decide what to do about one nobody is waiting for without translating
+        the message a second time.
         """
         if isinstance(message, dap.ConnectionClosed):
             event = events.SessionEnded(
@@ -234,7 +249,9 @@ class Session:
         else:
             event = events.from_dap(message.event, message.body)
 
-        self.bus.publish(self._apply(event))
+        event = self._apply(event)
+        self.bus.publish(event)
+        return event
 
     def _apply(self, event: events.Event) -> events.Event:
         """Fold `event` into the state and stamp it with the epoch it belongs to."""
@@ -252,7 +269,19 @@ class Session:
             return event
 
     def _on_stopped(self, event: events.Stopped) -> events.Stopped:
+        if event.all_threads and self.non_stop:
+            # pydevd leaks an all-stop notification into non-stop: every `pause`
+            # request arms a 0.5s timer, and the timer reports whichever thread
+            # happens to be suspended as a single notification without checking
+            # the mode (AbstractSingleNotificationBehavior._notify_after_timeout,
+            # which notify_thread_suspended does check). Taking it at face value
+            # marks every thread stopped, and -- worse -- satisfies a wait on a
+            # thread that never stopped, since a wait matches on all_threads.
+            event = dataclasses.replace(event, all_threads=False)
+
         reporter = self._track(event.thread_id) if event.thread_id is not None else None
+        if event.thread_id is not None:
+            self._last_stopped = event.thread_id
         targets = list(self._threads.values()) if event.all_threads else [reporter]
         for state in targets:
             if state is None:
@@ -333,6 +362,12 @@ class Session:
         with self._lock:
             return any(not state.stopped for state in self._threads.values())
 
+    @property
+    def running_threads(self) -> list[int]:
+        """The threads we believe are not suspended -- what interrupt() pauses."""
+        with self._lock:
+            return [state.id for state in self._threads.values() if not state.stopped]
+
     # ---------------------------------------------------------- resume bookkeeping
 
     def note_resume(self, thread_id: int | None) -> None:
@@ -369,47 +404,159 @@ class Session:
                 state.stopped = True
                 state.pending_resume = False
 
-    @contextlib.contextmanager
-    def resume_wait(self):
-        """Mark a caller as blocked on a resume outcome, for the reducer's benefit."""
+    def arm_resume(self, target: int | None, blocking: bool) -> ResumeWait:
+        """Register a resume as in flight. Armed before the request goes out."""
+        record = ResumeWait(target, blocking)
         with self._lock:
-            self._resume_waiters += 1
+            self._resumes.append(record)
+        return record
+
+    def begin_blocking(self, record: ResumeWait) -> None:
+        """A caller has parked on a resume that was issued in the background."""
+        with self._lock:
+            record.blocking = True
+
+    def disarm_resume(self, record: ResumeWait) -> None:
+        """The resume has resolved (or was never sent). Idempotent."""
+        with self._lock:
+            if record in self._resumes:
+                self._resumes.remove(record)
+
+    @contextlib.contextmanager
+    def resume_wait(self, target: int | None):
+        """Arm a blocking resume wait for the length of the block."""
+        record = self.arm_resume(target, blocking=True)
         try:
-            yield
+            yield record
         finally:
-            with self._lock:
-                self._resume_waiters -= 1
+            self.disarm_resume(record)
 
     @property
     def awaiting_resume(self) -> bool:
+        """Whether any caller is blocked on a resume outcome.
+
+        What decides whether a connection death is announced by whoever is
+        waiting on it, or has to be announced by the console.
+        """
         with self._lock:
-            return self._resume_waiters > 0
+            return any(record.blocking for record in self._resumes)
+
+    @property
+    def resume_in_flight(self) -> bool:
+        """Whether any resume we issued is still unresolved, waited on or not.
+
+        The precondition for switching execution modes.
+        """
+        with self._lock:
+            return bool(self._resumes)
+
+    def stop_is_awaited(self, event: events.Stopped) -> bool:
+        """Whether a blocked caller will report `event` as its own outcome."""
+        with self._lock:
+            return any(record.blocking and record.matches(event) for record in self._resumes)
+
+    def stop_was_news(self, event: events.Stopped) -> bool:
+        """Whether `event` told us something the one before it had not.
+
+        pydevd re-reports suspensions it has already reported: each `pause`
+        request arms its own notification timer, so one interrupt() across N
+        threads produces N copies of the same fact, all naming whichever thread
+        the timer happened to find suspended. Epochs move only on resume, so
+        "same thread, same epoch" is exactly "we already knew this".
+
+        Collapses consecutive repeats, which is the shape they arrive in. Read
+        by the console to decide whether a stop is worth announcing; nothing
+        about the state depends on it.
+        """
+        key = (event.thread_id, event.epoch)
+        with self._lock:
+            if key == self._last_stop_seen:
+                return False
+            self._last_stop_seen = key
+            return True
 
     # ---------------------------------------------------------- the cursor
 
     @property
+    def generation(self) -> int:
+        """Which connection we are on. Bumped by begin().
+
+        The same counter as the epoch seed, because both answer one question:
+        was this handle minted against the session we are in now.
+        """
+        return self._epoch_seed
+
+    def _selection(self) -> cursor.Cursor | None:
+        """This caller's selection, if it made one *in this session*.
+
+        A selection from a previous connection is not merely stale, it is
+        actively misleading: pydevd reuses small thread ids, so the id would
+        very likely resolve against a completely different thread. Treated as
+        never having chosen, so it reads the default instead.
+        """
+        chosen = self.cursors.get()
+        if chosen is None or chosen.generation != self.generation:
+            return None
+        return chosen
+
+    @property
     def current_thread_id(self) -> int | None:
-        return _cursor_thread.get()
+        """The calling caller's thread, or the session-wide default.
+
+        A caller that never selected one -- a worker thread, a subscription
+        drainer, and the REPL itself before its first `thread()` -- reads
+        through to the last thread to stop. Selecting one detaches that caller
+        from the default. Nobody is privileged: everyone who has not chosen sees
+        the same thread.
+        """
+        chosen = self._selection()
+        if chosen is not None and chosen.thread_id is not None:
+            return chosen.thread_id
+        return self._last_stopped
 
     @current_thread_id.setter
     def current_thread_id(self, thread_id: int | None) -> None:
+        selection = self.cursors.own()
         # Unconditionally: a frame handle from thread A is meaningless once B
         # is selected, whether or not either is running.
-        _cursor_frame.set(None)
-        _cursor_thread.set(thread_id)
+        selection.frame = None
+        selection.thread_id = thread_id
+        selection.generation = self.generation
+
+    def resolve_thread(self, thread_id: int | None = None) -> int | None:
+        """The thread a command means: the one it was given, or the cursor.
+
+        The single place an implicit cursor becomes an explicit argument. Every
+        command below takes its thread as a parameter and calls this to fill it
+        in, so nothing in the command layer is bound to there being an ambient
+        cursor at all -- which is what makes `cursor.scope()` swappable in one
+        place rather than auditable in five.
+        """
+        return thread_id if thread_id is not None else self.current_thread_id
 
     @property
     def current_frame_id(self) -> int | None:
-        handle = _cursor_frame.get()
+        handle = self.frame_handle
         return handle.frame_id if handle is not None else None
 
     @current_frame_id.setter
     def current_frame_id(self, frame_id: int | None) -> None:
+        selection = self.cursors.own()
+        selection.generation = self.generation
         if frame_id is None:
-            _cursor_frame.set(None)
+            selection.frame = None
             return
-        thread_id = _cursor_thread.get()
-        _cursor_frame.set(FrameHandle(thread_id, self.epoch_of(thread_id), frame_id))
+        # Through the property, so a caller reading the session-wide default
+        # still stamps a real thread onto the handle -- otherwise every later
+        # guard on this frame asks about None.
+        thread_id = self.current_thread_id
+        selection.frame = FrameHandle(thread_id, self.epoch_of(thread_id), frame_id)
+
+    @property
+    def frame_handle(self) -> FrameHandle | None:
+        """This caller's frame selection, unvalidated. See require_frame()."""
+        chosen = self._selection()
+        return chosen.frame if chosen is not None else None
 
     # ---------------------------------------------------------- read guards
 
@@ -445,7 +592,7 @@ class Session:
         be stopped, *and* the handle's epoch must still be current. Epochs only
         move on resume, so a running thread's stack churns at a constant epoch.
         """
-        handle = _cursor_frame.get()
+        handle = self.frame_handle
         if handle is None:
             # Report the more fundamental problem first: "use bt()" is useless
             # advice when bt() would fail for the same reason.
@@ -479,15 +626,54 @@ class Session:
         Process-lifetime state goes with it by implication -- we cannot track a
         debuggee we are no longer talking to.
 
-        Cursors are not cleared here and cannot be: they are context-local, and
-        this may run on any thread. They do not need to be -- with the table
-        emptied, a cursor left over from the dead session fails its guard with a
-        clean error rather than reading anything.
+        Breakpoints themselves survive, gdb-style, but `verified` is a fact
+        about one debuggee process rather than about the breakpoint, so it goes
+        back to False. A `disconnect()` that leaves the debuggee running still
+        ends our DAP session, so its sourceReferences and verifications are
+        just as dead either way.
+
+        Every caller's cursor goes too. That is possible only because the table
+        is ours: a ContextVar or a threading.local is writable solely from the
+        caller that owns it, so this reset could never have reached them, and
+        "a leftover selection fails its guard" would have had to be a hope about
+        the emptied thread table rather than something we do.
         """
         with self._lock:
             self.client = None
             self._threads.clear()
             self.sourceMap.clear()
+            self.cursors.clear()
+            self._last_stopped = None
+            for breakp in self.Breakpoints.values():
+                breakp.verified = False
+
+    def end_process(self) -> None:
+        """Process lifetime: kill the debuggee we spawned and reap it.
+
+        A no-op for a session we only connected to -- there is no child of ours
+        to kill, and terminating somebody else's debuggee is a DAP request
+        rather than a signal.
+        """
+        if self.process is None:
+            return
+        if self.process.child.poll() is None:
+            self.process.child.kill()
+        self.process.child.wait()
+        if self.process.master_fd is not None:
+            os.close(self.process.master_fd)
+        self.process = None
+        self.reader_thread = None
+
+    def end(self) -> None:
+        """Tear the connection and any process we spawned down as one unit.
+
+        They share one lifetime by design, so there is no ordering to get right
+        at the call sites: whoever ends either ends both.
+        """
+        if self.client is not None:
+            self.client.close()
+        self.end_process()
+        self.end_connection()
 
 
 SESSION = Session()

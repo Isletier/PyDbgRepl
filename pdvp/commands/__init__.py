@@ -18,13 +18,10 @@ from .source import __all__ as _source_all
 from .stack import *  # noqa: F401,F403
 from .stack import __all__ as _stack_all
 
-#from .breakpoints import breakpoint
-#from .breakpoints import clear
-#from .breakpoints import sbreak
-#from .breakpoints import fbreak
-#from .breakpoints import enable
-#from .breakpoints import disable
-
+# Not a topic module's command, but part of the same surface: a subscriber that
+# changes the program's state owns the reporting of what it did, and its output
+# lands while somebody is at a prompt.
+from ..console import print_async  # noqa: F401
 
 __all__ = [
     *_lifecycle_all,
@@ -34,4 +31,5 @@ __all__ = [
     *_inspect_all,
     *_source_all,
     *_misc_all,
+    "print_async",
 ]

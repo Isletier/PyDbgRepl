@@ -192,6 +192,13 @@ class Config:
     interactive: bool = dataclasses.field(
         default=True,
         metadata=opt(cli="--batch", style=Style.FLAG, invert=True))
+    # Execution mode: all-stop (default) suspends every thread when one stops;
+    # non-stop leaves the others running. Sent as attach arguments, so this is
+    # what the *next* run()/connect() will ask for -- once connected, the mode
+    # is changed with the non_stop() command, which can refuse.
+    non_stop: bool = dataclasses.field(
+        default=False,
+        metadata=opt(cli="--non-stop", style=Style.FLAG))
 
     # -- repl.py-only knobs: neither a flag nor emitted --
     # Per-stream file redirection for the inferior, gdb-style. Each defaults

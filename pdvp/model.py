@@ -83,6 +83,30 @@ class ThreadList(list):
         return "\n".join(lines)
 
 
+class CursorList(list):
+    """Rows from cursors(): one dict per caller that has selected something,
+    reprs with a "*" on the calling caller's own row and a final line for what
+    everyone who has not selected reads."""
+
+    def __init__(self, items, default_thread: int | None = None):
+        super().__init__(items)
+        self.default_thread = default_thread
+
+    def __repr__(self) -> str:
+        lines = []
+        for row in self:
+            marker = "*" if row["current"] else " "
+            frame = f", frame {row['frame']}" if row["frame"] is not None else ""
+            note = "  (from a previous session, ignored)" if row["stale"] else ""
+            lines.append(f"{marker} {row['owner']}: thread {row['thread']}{frame}{note}")
+
+        if self.default_thread is None:
+            lines.append("  (unselected): no thread has stopped yet")
+        else:
+            lines.append(f"  (unselected): thread {self.default_thread}")
+        return "\n".join(lines)
+
+
 class FrameList(list):
     """Stack frames from bt(): a list of the raw `stackTrace` frame dicts,
     reprs with a "*" marker on the current frame."""
@@ -217,9 +241,10 @@ class StopResult:
     disconnection got there first.
 
     `prefix`, if set, is one or more status lines (e.g. "continuing",
-    "launched pid=...") shown before the outcome. `suffix`, if set, is one or
-    more lines shown after it (e.g. re-evaluated display() expressions, or a
-    tbreak's auto-clear confirmation) -- gathered from `post_stop_hooks`.
+    "launched pid=...", "[Switching to thread 3]") shown before the outcome.
+    `suffix`, if set, is one or more lines shown after it (e.g. re-evaluated
+    display() expressions, or a tbreak's auto-clear confirmation) -- gathered
+    from `execution.stop_report_lines`.
     """
 
     def __init__(

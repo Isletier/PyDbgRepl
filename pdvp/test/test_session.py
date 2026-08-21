@@ -11,9 +11,12 @@ Run from the repo root with the venv active:
 
     python -m pdvp.test.test_session
 """
+import gc
 import threading
 
+from .. import cursor as cursor_module
 from .. import events as E
+from .. import model
 from ..dap import ConnectionClosed
 from ..model import Error
 from ..session import ControlRights, Session
@@ -213,25 +216,127 @@ def test_selecting_a_thread_clears_the_frame() -> None:
     assert session.current_frame_id is None
 
 
-def test_the_cursor_is_context_local() -> None:
+def test_the_cursor_is_per_caller() -> None:
     session = _connected()
-    session.current_thread_id = 1
+    session.reduce(_Message("thread", {"threadId": 2, "reason": "started"}))
+    session.current_thread_id = 2
     session.current_frame_id = 100
 
     seen = {}
 
-    def other_thread():
+    def other_caller():
+        # Never selected one, so it reads the session-wide default rather than
+        # the selection the main thread made.
         seen["thread"] = session.current_thread_id
         seen["frame"] = session.current_frame_id
-        session.current_thread_id = 1           # this thread's cursor only
+        session.current_thread_id = 1           # this caller's cursor only
 
-    worker = threading.Thread(target=other_thread)
+    worker = threading.Thread(target=other_caller)
     worker.start()
     worker.join()
 
-    assert seen == {"thread": None, "frame": None}, seen
-    # And the other thread's assignment did not disturb ours.
+    assert seen == {"thread": 1, "frame": None}, seen
+    # And the other caller's selection did not disturb ours.
+    assert session.current_thread_id == 2, session.current_thread_id
     assert session.current_frame_id == 100, session.current_frame_id
+
+
+def test_a_dead_caller_takes_its_cursor_with_it() -> None:
+    """Weak keys: nothing has to notice a caller left."""
+    session = Session()
+    session.begin(client=object())
+    assert session.cursors.all() == []
+
+    worker = threading.Thread(target=lambda: setattr(session, "current_thread_id", 1))
+    worker.start()
+    worker.join()
+    assert len(session.cursors.all()) == 1, session.cursors.all()
+
+    del worker
+    gc.collect()
+    assert session.cursors.all() == [], session.cursors.all()
+
+
+class _Token:
+    """A caller identity for the tests. Not `object()`: the table holds weak
+    keys, and `object()` instances cannot be weak-referenced."""
+
+
+def test_the_scope_function_decides_what_one_caller_is() -> None:
+    """The concurrency model is the caller's to name, so it is one function."""
+    session = Session()
+    session.begin(client=object())
+    session.reduce(_Message("stopped", {"threadId": 9, "reason": "breakpoint"}))
+
+    token_a, token_b = _Token(), _Token()
+    current: list = [token_a]
+    original = cursor_module.scope
+    cursor_module.scope = lambda: current[0]
+    try:
+        session.current_thread_id = 1
+        assert session.current_thread_id == 1
+
+        current[0] = token_b                    # a different caller entirely
+        assert session.current_thread_id == 9, "should read the default"
+
+        current[0] = token_a
+        assert session.current_thread_id == 1
+    finally:
+        cursor_module.scope = original
+
+
+def test_a_scope_naming_nobody_is_a_single_caller() -> None:
+    """A plain script: no per-caller state, one shared selection."""
+    session = _connected()
+    original = cursor_module.scope
+    cursor_module.scope = lambda: None
+    try:
+        session.current_thread_id = 1
+        seen = []
+        worker = threading.Thread(target=lambda: seen.append(session.current_thread_id))
+        worker.start()
+        worker.join()
+        assert seen == [1], seen
+    finally:
+        cursor_module.scope = original
+
+
+def test_a_selection_from_a_previous_session_is_ignored() -> None:
+    """pydevd reuses small thread ids, so a stale selection would not merely be
+    stale -- it would name a different thread of the same number."""
+    session = _connected()
+    session.current_thread_id = 1
+
+    session.end_connection()
+    session.begin(client=object())
+    session.reduce(_Message("stopped", {"threadId": 2, "reason": "breakpoint"}))
+
+    assert session.current_thread_id == 2, session.current_thread_id
+
+
+def test_an_unset_cursor_reads_the_last_thread_to_stop() -> None:
+    """The REPL's own context never selects a thread either, so without the
+    fallback the human would have to type thread(1) before their first cont()."""
+    session = Session()
+    session.begin(client=object())
+    assert session.current_thread_id is None
+
+    session.reduce(_Message("stopped", {"threadId": 4, "reason": "breakpoint"}))
+    assert session.current_thread_id == 4
+
+    session.reduce(_Message("stopped", {"threadId": 7, "reason": "breakpoint"}))
+    assert session.current_thread_id == 7
+
+
+def test_choosing_a_cursor_detaches_from_the_default() -> None:
+    session = Session()
+    session.begin(client=object())
+    session.reduce(_Message("stopped", {"threadId": 4, "reason": "breakpoint"}))
+
+    session.current_thread_id = 4               # the same value, but chosen
+    session.reduce(_Message("stopped", {"threadId": 7, "reason": "breakpoint"}))
+
+    assert session.current_thread_id == 4, session.current_thread_id
 
 
 # ---- lifetimes
@@ -261,19 +366,51 @@ def test_a_deliberate_close_is_not_a_disconnect() -> None:
 
 def test_end_connection_drops_connection_lifetime_state() -> None:
     session = _connected()
+    breakp = model.SourceBreakpoint("a.py", 10, None, None, None)
+    breakp.verified = True
+    session.Breakpoints[breakp.ID] = breakp
+
     session.end_connection()
 
     assert session.client is None
     assert session.threads == []
     assert isinstance(session.require_stopped(1), Error)
+    # The breakpoint survives, gdb-style; what it was told about one dead
+    # debuggee process does not.
+    assert session.Breakpoints[breakp.ID] is breakp
+    assert not breakp.verified
+
+
+def test_end_connection_drops_the_cursor_default() -> None:
+    """A thread id from a dead session names nothing, so a context that never
+    chose must not read through to one."""
+    session = Session()
+    session.begin(client=object())
+    session.reduce(_Message("stopped", {"threadId": 1, "reason": "breakpoint"}))
+    assert session.current_thread_id == 1
+
+    session.end_connection()
+    assert session.current_thread_id is None
+
+
+def test_running_threads_is_what_interrupt_pauses() -> None:
+    session = Session()
+    session.begin(client=object())
+    for tid in (1, 2, 3):
+        session.reduce(_Message("thread", {"threadId": tid, "reason": "started"}))
+    session.reduce(_Message("stopped", {"threadId": 2, "reason": "breakpoint"}))
+
+    assert sorted(session.running_threads) == [1, 3], session.running_threads
 
 
 def test_a_new_session_cannot_revalidate_an_old_frame() -> None:
-    """pydevd reuses small thread ids across runs, so epochs never restart."""
+    """pydevd reuses small thread ids across runs, so a selection from the last
+    connection would name a different thread of the same number. It is dropped
+    outright rather than left to fail a guard."""
     session = _connected()
     session.current_frame_id = 100
-    stale = session.require_frame()
-    assert not isinstance(stale, Error), stale
+    live = session.require_frame()
+    assert not isinstance(live, Error), live
 
     session.end_connection()
     session.begin(client=object())
@@ -281,7 +418,7 @@ def test_a_new_session_cannot_revalidate_an_old_frame() -> None:
     session.reduce(_Message("stopped", {"threadId": 1, "reason": "breakpoint"}))
 
     error = session.require_frame()
-    assert isinstance(error, Error) and "stale" in str(error), error
+    assert isinstance(error, Error) and "no current frame" in str(error), error
 
 
 def test_begin_rearms_the_ending_latch() -> None:
@@ -296,12 +433,50 @@ def test_begin_rearms_the_ending_latch() -> None:
 def test_awaiting_resume_tracks_blocked_callers() -> None:
     session = Session()
     assert not session.awaiting_resume
-    with session.resume_wait():
+    with session.resume_wait(1):
         assert session.awaiting_resume
-        with session.resume_wait():
+        with session.resume_wait(2):
             assert session.awaiting_resume
         assert session.awaiting_resume
     assert not session.awaiting_resume
+
+
+def test_a_background_resume_is_in_flight_but_not_awaited() -> None:
+    """The two questions differ: nobody will report a background resume's
+    outcome, but the mode may not be switched while it is still moving."""
+    session = Session()
+    record = session.arm_resume(1, blocking=False)
+
+    assert session.resume_in_flight
+    assert not session.awaiting_resume
+
+    session.begin_blocking(record)
+    assert session.awaiting_resume
+
+    session.disarm_resume(record)
+    assert not session.resume_in_flight
+    # Idempotent: Resumption.close() may follow a wait() that already disarmed.
+    session.disarm_resume(record)
+
+
+def test_a_stop_is_awaited_only_by_a_wait_that_claimed_it() -> None:
+    session = Session()
+    on_two = E.Stopped(thread_id=2, reason="breakpoint")
+
+    with session.resume_wait(1):
+        assert not session.stop_is_awaited(on_two)
+
+    with session.resume_wait(2):
+        assert session.stop_is_awaited(on_two)
+
+    # None is the all-stop claim: the resume moved the program, so whichever
+    # thread stopped is the one this caller was waiting for.
+    with session.resume_wait(None):
+        assert session.stop_is_awaited(on_two)
+
+    # And a stop that widened past the thread we named still ends our wait.
+    with session.resume_wait(1):
+        assert session.stop_is_awaited(E.Stopped(thread_id=2, reason="pause", all_threads=True))
 
 
 # ---- the thread control right
@@ -435,6 +610,8 @@ def main() -> int:
     failures = 0
     for test in TESTS:
         try:
+            # No isolation needed: a fresh Session owns a fresh cursor table, so
+            # one test's selection cannot be the next one's.
             test()
         except Exception as error:
             failures += 1
