@@ -11,7 +11,7 @@ navigation, so there is nothing for them to take.
 """
 from .. import cursor as _cursor
 from ..session import SESSION
-from pdvp.model import CursorList, Error, FrameRef, FrameList, Status, ThreadList
+from pdvp.model import CursorList, Error, ErrorKind, FrameRef, FrameList, Status, ThreadList
 
 __all__ = ["threads", "thread", "cursors", "bt", "frame", "up", "down"]
 
@@ -96,7 +96,7 @@ def frame(index: int) -> FrameRef | Error:
 
     frames = SESSION.client.stack_trace(thread_id).body.stackFrames
     if not (0 <= index < len(frames)):
-        return Error(f"no frame {index}")
+        return Error(f"no frame {index}", kind=ErrorKind.NO_SUCH_FRAME)
 
     f = frames[index]
     SESSION.current_frame_id = f["id"]
@@ -111,7 +111,7 @@ def _move_frame(delta: int) -> FrameRef | Error:
 
     frames = SESSION.client.stack_trace(thread_id).body.stackFrames
     if not frames:
-        return Error("no frames")
+        return Error("no frames", kind=ErrorKind.NO_FRAMES)
 
     if SESSION.current_frame_id is None:
         index = 0

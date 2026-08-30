@@ -23,24 +23,11 @@ from .. import events
 from ..config import CONFIG
 from ..console import StdinPassthrough
 from ..session import SESSION
-from pdvp.model import Error, PDVPError, Status, StopResult
+from pdvp.model import Error, ErrorKind, PDVPError, PydevdRefused, SourceLines, Status, StopResult
 from .breakpoints import commit_all
 from .location import current_location
 
 __all__ = ["cont", "step", "next", "finish", "interrupt", "jump", "control", "non_stop"]
-
-
-# Called from report_stop() to compose the returned StopResult's `suffix`: the
-# extra lines this command prints after "*** stopped ...", the way gdb prints
-# re-evaluated display expressions and a temporary breakpoint's auto-clear as
-# part of its own stop announcement.
-#
-# This is **not** an event system and must not become one. Reacting to a stop
-# belongs on the bus, where a subscriber gets its own thread, its own
-# subscription and the right to issue requests. Each entry here is called as
-# hook(reason, top_frame), returns one line of text or None, changes no state
-# and sends nothing.
-stop_report_lines: list = []
 
 
 def describe_thread(thread_id: int | None) -> str:
@@ -153,12 +140,14 @@ def resume(thread_id: int | None, request, wait: bool = True,
             return error
 
         resumption = _issue(key, request, prefix, blocking=wait)
+        if isinstance(resumption, Error):
+            return resumption
         if not wait:
             return resumption
         return resumption.wait()
 
 
-def _issue(key: int | None, request, prefix: str, blocking: bool) -> Resumption:
+def _issue(key: int | None, request, prefix: str, blocking: bool) -> Resumption | Error:
     """Arm the wait, then send. Never the other way round (P5)."""
     subscription = SESSION.bus.subscribe(
         events.Stopped,
@@ -171,6 +160,11 @@ def _issue(key: int | None, request, prefix: str, blocking: bool) -> Resumption:
     SESSION.note_resume(key)
     try:
         request(SESSION.client)
+    except _dap.DAPError as e:
+        SESSION.undo_resume(key)
+        SESSION.disarm_resume(record)
+        subscription.close()
+        return PydevdRefused(str(e), cause=e)
     except BaseException:
         SESSION.undo_resume(key)
         SESSION.disarm_resume(record)
@@ -203,6 +197,28 @@ def _await_with_stdin(subscription) -> events.Event:
             passthrough.stop()
 
 
+def _source_line_at(top: dict | None) -> SourceLines | None:
+    """The single line report_stop() stopped at, gdb-style -- one line, not a
+    window (use ls() for that on demand). Degrades to None rather than
+    failing the stop: a remote target, a deleted file, or a frame with no
+    source info at all are all "no line to show", not an error.
+    """
+    if top is None:
+        return None
+    path = (top.get("source") or {}).get("path")
+    line = top.get("line")
+    if not path or line is None:
+        return None
+    try:
+        with open(path) as f:
+            for lineno, text in enumerate(f, start=1):
+                if lineno == line:
+                    return SourceLines([(line, text.rstrip())], current_line=line)
+    except OSError:
+        return None
+    return None
+
+
 def report_stop(event: events.Stopped, prefix: str = "") -> StopResult:
     """Turn the stop that ended a wait into the caller's result.
 
@@ -232,9 +248,7 @@ def report_stop(event: events.Stopped, prefix: str = "") -> StopResult:
         except _dap.DAPError:
             pass
 
-    suffix = [line for line in (hook(event.reason, top) for hook in stop_report_lines) if line]
-
-    return StopResult(event, top_frame=top, prefix="\n".join(lines), suffix="\n".join(suffix))
+    return StopResult(event, top_frame=top, prefix="\n".join(lines), source=_source_line_at(top))
 
 
 # ---- the four resumes ----
@@ -251,7 +265,7 @@ def _step(request: str, prefix: str, thread: int | None,
     """
     thread_id = SESSION.resolve_thread(thread)
     if thread_id is None:
-        return Error("no current thread (use threads())")
+        return Error("no current thread (use threads())", kind=ErrorKind.NO_CURRENT_THREAD)
     return resume(thread_id, lambda client: getattr(client, request)(thread_id),
                   wait=wait, prefix=prefix)
 
@@ -295,22 +309,22 @@ def jump(line: int, *, thread: int | None = None,
 
     path, _ = current_location()
     if path is None:
-        return Error("no current file")
+        return Error("no current file", kind=ErrorKind.NO_CURRENT_FILE)
 
     try:
         targets = SESSION.client.goto_targets({"path": path}, line).body.targets
     except _dap.DAPError as e:
-        return Error(str(e))
+        return PydevdRefused(str(e), cause=e)
     if not targets:
-        return Error(f"no jump target at {path}:{line}")
+        return Error(f"no jump target at {path}:{line}", kind=ErrorKind.NO_JUMP_TARGET)
 
     # goto lands the thread on a new line and pydevd reports it with a
-    # `stopped` event, so the outcome is the ordinary resume outcome.
+    # `stopped` event, so the outcome is the ordinary resume outcome. resume()
+    # itself never lets a DAPError from the goto request escape -- _issue()
+    # already turns it into PydevdRefused -- so there is nothing left to catch
+    # here.
     target_id = targets[0]["id"]
-    try:
-        return resume(thread_id, lambda client: client.goto(thread_id, target_id), wait=wait)
-    except _dap.DAPError as e:
-        return Error(str(e))
+    return resume(thread_id, lambda client: client.goto(thread_id, target_id), wait=wait)
 
 
 # ---- interrupt ----
@@ -337,11 +351,11 @@ def interrupt() -> Status | Error:
     would otherwise be blocking.
     """
     if SESSION.client is None:
-        return Error("not connected (use connect())")
+        return Error("not connected (use connect())", kind=ErrorKind.NOT_CONNECTED)
 
     running = SESSION.running_threads
     if not running:
-        return Error("program is not running")
+        return Error("program is not running", kind=ErrorKind.PROGRAM_NOT_RUNNING)
 
     for thread_id in running:
         try:
@@ -402,12 +416,13 @@ def non_stop(enable: bool | None = None) -> Status | Error:
         if error is not None:
             return error
         if SESSION.resume_in_flight:
-            return Error("a resume is in flight (use interrupt(), then try again)")
+            return Error("a resume is in flight (use interrupt(), then try again)",
+                         kind=ErrorKind.RESUME_IN_FLIGHT)
 
         try:
             SESSION.client.set_debugger_property(multi_threads_single_notification=not enable)
         except _dap.DAPError as e:
-            return Error(str(e))
+            return PydevdRefused(str(e), cause=e)
 
         SESSION.non_stop = enable
         CONFIG.non_stop = enable
@@ -416,7 +431,9 @@ def non_stop(enable: bool | None = None) -> Status | Error:
         # breakpoint is installed, so breakpoints set before the flip keep the old
         # behaviour until they are sent again -- new stops reported one way, old
         # breakpoints suspending the other.
-        commit_all()
+        err = commit_all()
+        if err is not None:
+            return err
 
     return Status(f"{_mode_name(enable)}")
 

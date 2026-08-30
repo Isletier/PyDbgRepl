@@ -25,7 +25,9 @@ Run from the repo root with the venv active:
     python -m pdvp.test.test_execution
 """
 import importlib
+import os
 import sys
+import tempfile
 import threading
 import time
 
@@ -41,7 +43,7 @@ execution = importlib.import_module("pdvp.commands.execution")
 lifecycle = importlib.import_module("pdvp.commands.lifecycle")
 stack = importlib.import_module("pdvp.commands.stack")
 from .. import dap as _dap
-from ..model import Error, Status, StopResult
+from ..model import Error, ErrorKind, SourceLines, StaleFrameError, Status, StopResult
 from ..session import SESSION as _REAL_SESSION
 from ..session import Session
 
@@ -63,8 +65,9 @@ class _Body:
 
 
 class _Response:
-    def __init__(self, success: bool = True, **body_kw):
+    def __init__(self, success: bool = True, message: str | None = None, **body_kw):
         self.success = success
+        self.message = message
         self.body = _Body(**body_kw)
 
 
@@ -227,6 +230,49 @@ def test_cont_blocks_until_the_stop_and_returns_a_stop_result() -> None:
         assert client.calls_for("continue_")[0][1] == (1,)
         assert session.current_thread_id == 1
     finally:
+        restore()
+
+
+def test_stop_result_source_is_none_when_the_file_is_not_reachable() -> None:
+    """FakeClient's stack_trace() always reports source path "t.py", which
+    does not exist relative to the test process's cwd -- the default case
+    every other test in this file already exercises without noticing.
+    Pinned explicitly: a missing file must degrade to `source=None`, not
+    raise and fail the stop."""
+    session, client, restore = _new_session_env()
+    try:
+        _connected(session, client, 1, non_stop=True)
+        _in_a_thread(lambda: (time.sleep(0.05), _stop(session, 1)))
+        result = execution.cont(thread=1)
+
+        assert isinstance(result, StopResult), result
+        assert result.source is None
+    finally:
+        restore()
+
+
+def test_stop_result_carries_the_single_source_line_when_reachable() -> None:
+    session, client, restore = _new_session_env()
+    before = os.getcwd()
+    tmpdir = tempfile.TemporaryDirectory()
+    try:
+        with open(os.path.join(tmpdir.name, "t.py"), "w") as f:
+            f.write("first\nsecond\nthird\n")
+        os.chdir(tmpdir.name)
+
+        _connected(session, client, 1, non_stop=True)
+        _in_a_thread(lambda: (time.sleep(0.05), _stop(session, 1)))
+        result = execution.cont(thread=1)
+
+        assert isinstance(result, StopResult), result
+        # FakeClient's stack_trace() always reports line 1.
+        assert isinstance(result.source, SourceLines), result.source
+        assert list(result.source) == [(1, "first")], result.source
+        assert result.source.current_line == 1
+        assert "first" in repr(result)
+    finally:
+        os.chdir(before)
+        tmpdir.cleanup()
         restore()
 
 
@@ -599,8 +645,13 @@ def test_a_stale_frame_is_refused_for_a_caller_who_did_not_resume_it() -> None:
 
         proceed.set()
         a.join(2)
-        assert isinstance(outcome.get("guard"), Error), outcome.get("guard")
-        assert "stale" in outcome["guard"]
+        guard = outcome.get("guard")
+        assert isinstance(guard, Error), guard
+        assert "stale" in guard
+        assert isinstance(guard, StaleFrameError), guard
+        assert guard.kind is ErrorKind.STALE_FRAME
+        assert guard.thread_id == 1
+        assert guard.current_epoch > guard.stale_epoch
     finally:
         restore()
 

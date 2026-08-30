@@ -1,12 +1,11 @@
-"""Inspection: p, locals, globals_, setvar, whatis, display/undisplay, exception_info, completions."""
+"""Inspection: p, locals, globals_, setvar, whatis, exception_info, completions."""
 from .. import dap as _dap
 from ..session import SESSION
-from . import execution
-from pdvp.model import CompletionList, Error, ExceptionInfo, Scope, Status
+from pdvp.model import CompletionList, Error, ExceptionInfo, PydevdRefused, Scope, Status
 
 __all__ = [
     "p", "locals", "globals_", "setvar", "whatis",
-    "display", "undisplay", "exception_info", "completions",
+    "exception_info", "completions",
 ]
 
 # Everything here reads through a frame, so everything here goes through
@@ -24,7 +23,7 @@ def p(expression: str) -> Status | Error:
     try:
         result = SESSION.client.evaluate(expression, frame_id=frame.frame_id, context="repl")
     except _dap.DAPError as e:
-        return Error(str(e))
+        return PydevdRefused(str(e), cause=e)
     return Status(result.body.result)
 
 
@@ -59,7 +58,7 @@ def setvar(name: str, value: str) -> Status | Error:
     try:
         SESSION.client.evaluate(f"{name} = {value}", frame_id=frame.frame_id, context="repl")
     except _dap.DAPError as e:
-        return Error(str(e))
+        return PydevdRefused(str(e), cause=e)
     return Status(f"{name} = {value}")
 
 
@@ -72,35 +71,8 @@ def whatis(expression: str) -> Status | Error:
     try:
         result = SESSION.client.evaluate(expression, frame_id=frame.frame_id, context="hover")
     except _dap.DAPError as e:
-        return Error(str(e))
+        return PydevdRefused(str(e), cause=e)
     return Status(result.body.type or "?")
-
-
-def display(expression: str) -> Status:
-    """Add `expression` to the list re-evaluated after every stop."""
-    display_id = max((d["id"] for d in SESSION.displays), default=0) + 1
-    SESSION.displays.append({"id": display_id, "expr": expression})
-    lines = [f"{display_id}: {expression}"]
-    if SESSION.is_stopped(SESSION.current_thread_id):
-        lines.append(_show_display(SESSION.displays[-1]))
-    return Status("\n".join(lines))
-
-
-def undisplay(display_id: int) -> Status | Error:
-    """Remove a display expression added with display()."""
-    before = len(SESSION.displays)
-    SESSION.displays[:] = [d for d in SESSION.displays if d["id"] != display_id]
-    if len(SESSION.displays) == before:
-        return Error(f"no display {display_id}")
-    return Status(f"{display_id}: deleted")
-
-
-def _show_display(d: dict) -> str:
-    try:
-        result = SESSION.client.evaluate(d["expr"], frame_id=SESSION.current_frame_id, context="repl")
-    except _dap.DAPError as e:
-        return f"{d['id']}: {d['expr']} = <error: {e}>"
-    return f"{d['id']}: {d['expr']} = {result.body.result}"
 
 
 def exception_info(*, thread: int | None = None) -> ExceptionInfo | Error:
@@ -113,7 +85,7 @@ def exception_info(*, thread: int | None = None) -> ExceptionInfo | Error:
     try:
         info = SESSION.client.exception_info(thread_id)
     except _dap.DAPError as e:
-        return Error(str(e))
+        return PydevdRefused(str(e), cause=e)
 
     return ExceptionInfo(info.body.to_dict())
 
@@ -131,15 +103,5 @@ def completions(text: str, column: int) -> CompletionList | Error:
     try:
         result = SESSION.client.completions(text, column, frame_id=frame.frame_id)
     except _dap.DAPError as e:
-        return Error(str(e))
+        return PydevdRefused(str(e), cause=e)
     return CompletionList(result.body.targets)
-
-
-def _display_lines(reason: str | None, top: dict | None) -> str | None:
-    """The display() expressions, re-evaluated, as part of the stop's own report."""
-    if not SESSION.displays:
-        return None
-    return "\n".join(_show_display(d) for d in SESSION.displays)
-
-
-execution.stop_report_lines.append(_display_lines)

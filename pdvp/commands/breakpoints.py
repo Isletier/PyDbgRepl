@@ -7,6 +7,8 @@
     """
 
 import pdvp.model as model
+from pdvp import dap as _dap
+from pdvp.model import Error, PydevdRefused
 from pdvp.session import SESSION
 from pathlib import Path
 from pdvp.dap.client import Client
@@ -21,7 +23,7 @@ __all__ = [
 ]
 
 
-def commit_all() -> None:
+def commit_all() -> Error | None:
     sources: set[model.SourcePath] = set()
 
     for key, breakp in SESSION.Breakpoints.items():
@@ -32,16 +34,16 @@ def commit_all() -> None:
 
 
     for source in sources:
-        commit_source_breakpoints(source)
+        err = commit_source_breakpoints(source)
+        if err is not None:
+            return err
 
-    commit_function_breakpoints()
-
-    return
+    return commit_function_breakpoints()
 
 
-def commit_source_breakpoints(path: model.SourcePath):
+def commit_source_breakpoints(path: model.SourcePath) -> Error | None:
     if SESSION.client is None:
-        return
+        return None
 
     source_br_list: list[model.SourceBreakpoint] = list()
     for i, breakp in SESSION.Breakpoints.items():
@@ -65,26 +67,29 @@ def commit_source_breakpoints(path: model.SourcePath):
 
     serialized_source: schema.Source = SESSION.sourceMap.get_source(path)
 
-    responce = SESSION.client.set_breakpoints(serialized_source, serialized_br)
-    if not responce.success:
-        raise model.PDVPError()
+    try:
+        responce = SESSION.client.set_breakpoints(serialized_source, serialized_br)
+        if not responce.success:
+            return PydevdRefused(responce.message or f"failed to set breakpoints in {path}")
 
-    for b, destination_breakpoint in zip(responce.body.breakpoints, source_br_list):
-        source_breakpoint = schema.Breakpoint(**b)
-        SESSION.sourceMap.register_source(source_breakpoint.source)
+        for b, destination_breakpoint in zip(responce.body.breakpoints, source_br_list):
+            source_breakpoint = schema.Breakpoint(**b)
+            SESSION.sourceMap.register_source(source_breakpoint.source)
 
-        destination_breakpoint.verified = source_breakpoint.verified
-        # pydevd may slide a breakpoint onto the next executable line, and the
-        # breakpoint's location follows that resolution. A breakpoint that
-        # failed to verify comes back with no line at all -- keep ours then.
-        if source_breakpoint.line is not None:
-            destination_breakpoint.line = source_breakpoint.line
-        destination_breakpoint.path = path
+            destination_breakpoint.verified = source_breakpoint.verified
+            # pydevd may slide a breakpoint onto the next executable line, and the
+            # breakpoint's location follows that resolution. A breakpoint that
+            # failed to verify comes back with no line at all -- keep ours then.
+            if source_breakpoint.line is not None:
+                destination_breakpoint.line = source_breakpoint.line
+            destination_breakpoint.path = path
+    except _dap.DAPError as e:
+        return PydevdRefused(str(e), cause=e)
 
-    return
+    return None
 
 
-def sbreak(*args, condition: str | None = None, hit_condition: str | None = None, log_message: str | None = None) -> model.SourceBreakpoint:
+def sbreak(*args, condition: str | None = None, hit_condition: str | None = None, log_message: str | None = None) -> model.SourceBreakpoint | Error:
     match args:
         case [int(line)]:
             path = current_file()
@@ -108,13 +113,15 @@ def sbreak(*args, condition: str | None = None, hit_condition: str | None = None
 
     SESSION.Breakpoints[source_br.ID] = source_br
 
-    commit_source_breakpoints(path)
+    err = commit_source_breakpoints(path)
+    if err is not None:
+        return err
 
     return source_br
 
-def commit_function_breakpoints():
+def commit_function_breakpoints() -> Error | None:
     if SESSION.client is None:
-        return
+        return None
 
     func_br_list: list[model.FunctionBreakpoint] = list()
     for i, breakp in SESSION.Breakpoints.items():
@@ -131,20 +138,23 @@ def commit_function_breakpoints():
             breakp.hitCondition
         ))
 
-    responce = SESSION.client.set_function_breakpoints(serialized_br)
-    if not responce.success:
-        raise model.PDVPError()
+    try:
+        responce = SESSION.client.set_function_breakpoints(serialized_br)
+        if not responce.success:
+            return PydevdRefused(responce.message or "failed to set function breakpoints")
 
-    for b, destination_breakpoint in zip(responce.body.breakpoints, func_br_list):
-        source_breakpoint = schema.Breakpoint(**b)
-        SESSION.sourceMap.register_source(source_breakpoint.source)
+        for b, destination_breakpoint in zip(responce.body.breakpoints, func_br_list):
+            source_breakpoint = schema.Breakpoint(**b)
+            SESSION.sourceMap.register_source(source_breakpoint.source)
 
-        destination_breakpoint.verified = source_breakpoint.verified
+            destination_breakpoint.verified = source_breakpoint.verified
+    except _dap.DAPError as e:
+        return PydevdRefused(str(e), cause=e)
 
-    return
+    return None
 
 
-def fbreak(func_name: str, condition: str | None = None, hitCondition: str | None = None) -> model.FunctionBreakpoint:
+def fbreak(func_name: str, condition: str | None = None, hitCondition: str | None = None) -> model.FunctionBreakpoint | Error:
     function_break: model.FunctionBreakpoint = model.FunctionBreakpoint(
         func_name,
         condition,
@@ -153,12 +163,14 @@ def fbreak(func_name: str, condition: str | None = None, hitCondition: str | Non
 
 
     SESSION.Breakpoints[function_break.ID] = function_break
-    commit_function_breakpoints()
+    err = commit_function_breakpoints()
+    if err is not None:
+        return err
 
     return SESSION.Breakpoints[function_break.ID]
 
 
-def breakpoint(*args) -> model.Breakpoint | None:
+def breakpoint(*args) -> model.Breakpoint | Error:
     match args:
         case [int() as line]:
             return sbreak(line)
@@ -174,49 +186,42 @@ def breakpoint(*args) -> model.Breakpoint | None:
     raise model.PDVPError("invalid arguments for breakpoint()")
 
 
-def clear(Id: int):
+def clear(Id: int) -> Error | None:
     """Forget breakpoint `Id` entirely."""
     match bp := SESSION.Breakpoints.get(Id):
         case model.SourceBreakpoint():
             source = bp.path
             del SESSION.Breakpoints[Id]
-            commit_source_breakpoints(source)
-            pass
+            return commit_source_breakpoints(source)
         case model.FunctionBreakpoint():
             del SESSION.Breakpoints[Id]
-            commit_function_breakpoints()
-            pass
+            return commit_function_breakpoints()
         case None:
-            pass
+            return None
 
-    return
 
-def _set_enable(Id: int, flag: bool):
+def _set_enable(Id: int, flag: bool) -> Error | None:
     """Re-enable a breakpoint without forgetting its condition/etc."""
     match bp := SESSION.Breakpoints.get(Id):
         case model.SourceBreakpoint():
             source = bp.path
             SESSION.Breakpoints[Id].enabled = flag
-            commit_source_breakpoints(source)
-            pass
+            return commit_source_breakpoints(source)
         case model.FunctionBreakpoint():
             SESSION.Breakpoints[Id].enabled = flag
-            commit_function_breakpoints()
-            pass
+            return commit_function_breakpoints()
         case None:
-            pass
-
-    return
+            return None
 
 
-def enable(Id: int):
-    _set_enable(Id, True)
+def enable(Id: int) -> Error | None:
+    return _set_enable(Id, True)
 
-def disable(Id: int):
-    _set_enable(Id, False)
+def disable(Id: int) -> Error | None:
+    return _set_enable(Id, False)
 
 
-def breakpoints():
-    """All breakpoints, function breakpoints, and exception filters."""
-    return SESSION.Breakpoints
+def breakpoints() -> model.Breakpoints:
+    """All breakpoints and function breakpoints, grouped by file for display."""
+    return model.Breakpoints(SESSION.Breakpoints)
 

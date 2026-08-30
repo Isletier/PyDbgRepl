@@ -8,7 +8,7 @@ cursor already names.
 from .. import dap as _dap
 from ..config import CONFIG
 from ..session import SESSION
-from pdvp.model import Error
+from pdvp.model import Error, ErrorKind
 
 
 def current_location() -> tuple[str | None, int | None]:
@@ -40,9 +40,9 @@ def resolve_path_line(path_or_line: str | int, line: int | None) -> tuple[str, i
     if isinstance(path_or_line, int):
         path = current_file()
         if path is None:
-            return Error("no current file (pass an explicit path)")
+            return Error("no current file (pass an explicit path)", kind=ErrorKind.NO_CURRENT_FILE)
         return path, path_or_line
 
     if line is None:
-        return Error("line number required")
+        return Error("line number required", kind=ErrorKind.LINE_NUMBER_REQUIRED)
     return path_or_line, line

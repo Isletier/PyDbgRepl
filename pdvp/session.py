@@ -188,7 +188,6 @@ class Session:
         # ---- program lifetime: reset by nothing ----
         self.bus = events.EventBus()
         self.Breakpoints: dict[int, model.Breakpoint] = {}
-        self.displays: list[dict] = []
         # Program lifetime because a hold is ended by its holder, never by a
         # lifetime reset: the caller blocked in a resume is woken by the
         # session ending and releases on its way out.
@@ -562,7 +561,7 @@ class Session:
 
     def require_connected(self) -> model.Error | None:
         if self.client is None:
-            return model.Error("not connected (use connect())")
+            return model.Error("not connected (use connect())", kind=model.ErrorKind.NOT_CONNECTED)
         return None
 
     def require_stopped(self, thread_id: int | None) -> model.Error | None:
@@ -577,12 +576,12 @@ class Session:
         if error is not None:
             return error
         if thread_id is None:
-            return model.Error("no current thread (use threads())")
+            return model.Error("no current thread (use threads())", kind=model.ErrorKind.NO_CURRENT_THREAD)
         state = self.thread_state(thread_id)
         if state is None:
-            return model.Error(f"no thread {thread_id}")
+            return model.Error(f"no thread {thread_id}", kind=model.ErrorKind.NO_SUCH_THREAD)
         if not state.stopped:
-            return model.Error(f"thread {thread_id} is running")
+            return model.Error(f"thread {thread_id} is running", kind=model.ErrorKind.THREAD_RUNNING)
         return None
 
     def require_frame(self) -> FrameHandle | model.Error:
@@ -597,12 +596,15 @@ class Session:
             # Report the more fundamental problem first: "use bt()" is useless
             # advice when bt() would fail for the same reason.
             error = self.require_stopped(self.current_thread_id)
-            return error if error is not None else model.Error("no current frame (use bt())")
+            if error is not None:
+                return error
+            return model.Error("no current frame (use bt())", kind=model.ErrorKind.NO_CURRENT_FRAME)
         error = self.require_stopped(handle.thread_id)
         if error is not None:
             return error
-        if handle.epoch != self.epoch_of(handle.thread_id):
-            return model.Error("frame is stale, the program has resumed since (use bt())")
+        current_epoch = self.epoch_of(handle.thread_id)
+        if handle.epoch != current_epoch:
+            return model.StaleFrameError(handle.thread_id, handle.epoch, current_epoch)
         return handle
 
     # ---------------------------------------------------------- lifetimes

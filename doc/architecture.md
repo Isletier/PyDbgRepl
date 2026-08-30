@@ -996,98 +996,28 @@ generic "absent is false" helper gets the second one backwards.
 - Whether `model.py`'s result objects should also grow methods (not just
   fields) for pleasant non-REPL/scripting use, and whether `InfoSections`/
   `ExceptionInfo` should keep the real schema object instead of the current
-  `.body.to_dict()` flattening — the two pieces of the output/return-type
-  redesign (see "Decided, not yet built" below) not yet resolved. Also
+  `.body.to_dict()` flattening — neither piece of the output/return-type
+  redesign (see "Decided, not yet built" below) is resolved. Also
   unresolved: a broader audit for exceptions other than `DAPError` escaping
-  the command surface where they shouldn't (§ below, point 2) — real
-  implementation-time work, not started.
+  the command surface where they shouldn't ("Decided and built" below, the
+  `DAPError`-leak fix entry) — real implementation-time work, not started.
 
 ### Decided, not yet built: the output/return-type redesign
 
 A design pass on `model.py`'s result types and the core/extra package split,
-across several conversations — decided, but none of it implemented yet.
-`StopResult`'s `prefix`/`suffix` string-splicing and `Status` (currently just
-a falsy-aware `str`) are the symptom that started it: ad hoc stringification
-standing in for real fields.
+across several conversations — decided, but not all of it implemented yet.
+`Status` (currently just a falsy-aware `str`) is the remaining symptom of
+what started it: ad hoc stringification standing in for real fields. Points
+1, 2, and 5 of the original 9-point list are done — see "Decided and built"
+below; what's left:
 
-1. **`stop_report_lines`/`display()` — removed, not relocated.**
-   `stop_report_lines` (the hook `display()` registers into,
-   `commands/execution.py`) only ever fires for a resume the calling context
-   itself initiated and is blocked on — `report_stop()` is only reached from
-   `Resumption.wait()`. Every other stop (`lifecycle._dispatch()`'s
-   `not SESSION.stop_is_awaited(event)` branch — the normal case of a
-   *different* thread stopping in non-stop mode) is a bare `print_async`
-   announcement, no `stop_report_lines` involved. So `display()`'s
-   gdb-inherited promise — "show me this after every stop" — already failed
-   for exactly the case a human couldn't just retype `p()` themselves; it
-   only fired where doing that manually cost nothing anyway. Its payload
-   (`f"{id}: {expr} = {value}"`) is pre-formatted display text, not data, so
-   it served no scripting need either way. Not worth a core hook. If kept,
-   it's a three-line wrapper living entirely in extra.
-2. **Errors are return values, never raised, except for genuine program
-   invariant violations.** Same shape as Rust's `Result<T, E>`/Go's
-   `(value, error)` — reserve `raise` for "this should be impossible if pdvp
-   has no bugs," not for anything externally caused. Makes the `DAPError`
-   leaks in `cont()`/`step()`/`next()`/`finish()`, `breakpoints.py`'s commit
-   functions, and `source.py`'s `_fetch()` unambiguous bugs to fix — not a
-   "maybe intentional" question anymore. A broader audit for *other* stray
-   exceptions (index/key/attribute errors from unexpected-shaped DAP
-   responses) is separate, real work, not started — good fit for the
-   FakeClient harness: feed malformed/edge-shaped responses, confirm `Error`
-   comes back instead of a crash.
-3. **Error taxonomy: a hybrid, not a plain enum or a full subclass
-   hierarchy.** One `Error` base (keeps the existing
-   `isinstance`/falsy contract unchanged), an `ErrorKind` enum tag for the
-   common/uniform kinds (not connected, thread running, ...), plus real
-   typed subclasses for the few kinds that carry genuine extra structured
-   data a type checker should narrow (a stale-frame error's epoch/thread id;
-   a pydevd-refusal error's underlying message). `isinstance`-based category
-   checks work identically whether or not anything is ever raised, so
-   hierarchy depth was never actually tied to the raise-vs-return choice.
-4. **`RunResult`/`ConnectResult` wrap or extend `StopResult` — they do not
-   share one flat type with `cont()`/`step()`/`next()`/`finish()`.**
-   `RunResult` adds `killed_previous`, `spawned_pid`, `connected_to`;
-   `ConnectResult` adds just `connected_to` (`connect()` never spawns or
-   kills anything); the four resume commands keep plain, uncluttered
-   `StopResult`. Concretely motivated by a real duplication already in the
-   code: `_handshake()` threads the spawned pid through two channels today —
-   unstructured text in `run()`'s `prefix_lines` *and* the structured
-   `events.SessionStarted(pid=pid)` — the redesign makes the return value
-   carry it structurally too, not just the event.
-5. **`StopResult` should also carry the source line it stopped at.**
-   `commands/source.py`'s `ls()` already has exactly the machinery needed —
-   reads the file, wraps the result in `model.SourceLines` (a `list`
-   subclass of `(lineno, text)` pairs with a `->` marker on the current
-   line) — so this is reusing an existing type, not inventing one. Two
-   details to settle when this is built, not decided yet: gdb's own
-   convention is a *single* line at a stop (a full window is what `list`/
-   `ls()` is for on demand), and fetching costs a file read (or, for a
-   `sourceReference`-backed source, a round trip through `SESSION.sourceMap`)
-   that should degrade gracefully — never fail the stop itself — if the
-   source isn't reachable.
-6. **`model.Breakpoints` redesign, and the general Python answer to "a nice
-   collection type that's still plain-dict/list-usable."** `model.Breakpoints`
-   is fully written (grouped-by-file `__repr__`) but is dead code —
-   `commands/breakpoints.py`'s `breakpoints()` returns the bare
-   `SESSION.Breakpoints` dict instead (confirmed via grep, zero references
-   to `model.Breakpoints(` anywhere). Decided direction: rebuild it as a
-   `dict[int, Breakpoint]` *subclass* — matching `SESSION.Breakpoints`'s own
-   shape exactly, one source of truth — with the file-grouped display
-   computed on demand in `__repr__`, not stored as the three separately
-   -tracked constructor arguments it takes today. `breakpoints()` becomes
-   `return model.Breakpoints(SESSION.Breakpoints)`. This is the general
-   pattern for "nice collection type usable as the plain builtin" in
-   Python: subclass the builtin container (`pdvp` already does this
-   everywhere — `ThreadList(list)`, `ModuleList(list)`, `InfoSections(dict)`)
-   rather than reaching for a C++-style conversion operator Python doesn't
-   have — the object *is* the dict/list, no separate representation to go
-   stale.
-7. **Exception documentation reframed, not just deprioritized.** Since
-   nothing should raise under normal operation (point 2), `Raises:` isn't
-   the useful thing to document — the useful equivalent is which `Error`
-   *kinds* (point 3) a command can return: `Returns Error(kind=...) when:`
-   instead of `Raises:`.
-8. **Core/extra split — by compositeness, not by ptpython dependency.**
+1. **Exception documentation reframed, not just deprioritized.** Since
+   nothing should raise under normal operation (see "Decided and built"
+   below), `Raises:` isn't the useful thing to document — the useful
+   equivalent is which `Error` *kinds* (`model.ErrorKind`, now built — see
+   "Decided and built") a command can return: `Returns Error(kind=...)
+   when:` instead of `Raises:`.
+2. **Core/extra split — by compositeness, not by ptpython dependency.**
    Core is the thin one-request-one-response layer plus the machinery that
    supports it (session, cursor, control rights, event bus, config, launch,
    transport/client, the primitive commands). Extra is everything built on
@@ -1099,9 +1029,9 @@ standing in for real fields.
    canned convenience — a script, a plugin, a pre-configured debug suite, or
    an AI agent sketching the three-line equivalent of a composite command
    itself. Extra is the convenience layer for interactive humans and more
-   elaborate tooling — why point 1's `display()` belongs there despite
-   importing nothing ptpython-specific.
-9. **Rendering hook (`pt_repr`-style) — out of scope for now.** Depends on
+   elaborate tooling — why `display()` (removed, see below) would have
+   belonged there despite importing nothing ptpython-specific.
+3. **Rendering hook (`pt_repr`-style) — out of scope for now.** Depends on
    the core/extra split existing as a real package boundary, not just a
    documented intention. Two directions floated, not chosen between: a
    duck-typed method returning a plain `list[tuple[str, str]]` (structurally
@@ -1109,9 +1039,9 @@ standing in for real fields.
    or a `functools.singledispatch`-style renderer registry living entirely
    in extra.
 
-None of this is implemented. Start with points 1 and 2 (self-contained, no
-dependency on the rest); point 3 gates point 7; points 4, 5, and 6 are
-independent of the taxonomy work and of each other.
+None of this is implemented. Point 1 is unblocked now that the taxonomy
+exists; points 2 and 3 depend on each other (3 needs 2's package boundary to
+exist) but not on point 1.
 
 ### Decided and built
 
@@ -1162,6 +1092,82 @@ list as missing:
   applies the same rule `resume()` already did. Regression test:
   `test_non_stop_re_checks_the_connection_after_the_right_is_acquired` in
   `pdvp/test/test_execution.py`.
+- **Removed: `stop_report_lines`/`display()`/`undisplay()`.** The hook list,
+  `_show_display()`, and `SESSION.displays` are gone from
+  `commands/execution.py`/`commands/inspect_.py`/`session.py`; `StopResult`
+  no longer has a `suffix` field. See point 1 of the output/return-type
+  redesign above for why. Not relocated to extra — extra isn't a real
+  package boundary yet, and a vestigial `display()` that stores expressions
+  nothing reads back is worse than no `display()` at all. Revisit if/when
+  extra exists.
+- **Fixed: every `DAPError` leak named in the redesign's point 2 now returns
+  `Error(...)` instead of raising or crashing.** `execution.py`'s `_issue()`
+  catches `DAPError` around the resume request and returns `Error` (cleaning
+  up the same resume/subscription state the `BaseException` branch already
+  did); `resume()`/`non_stop()` propagate it. `breakpoints.py`'s
+  `commit_source_breakpoints()`/`commit_function_breakpoints()` now catch
+  `DAPError` and turn a failed response (`success=False`) into `Error`
+  instead of `raise model.PDVPError()`; `commit_all()`, `sbreak()`,
+  `fbreak()`, `clear()`, `enable()`/`disable()`, and `lifecycle.py`'s
+  `_handshake()` all propagate the result instead of discarding it. The
+  broader stray-exception audit (index/key/attribute errors from
+  unexpected-shaped DAP responses, not just `DAPError`) is still open, not
+  started.
+- **Built: `RunResult`/`ConnectResult` wrap `StopResult`.** `run()`/`restart()`
+  return `RunResult` (adds `killed_previous`, `spawned_pid`, `connected_to`);
+  `connect()` returns `ConnectResult` (adds just `connected_to`); `cont()`/
+  `step()`/`next()`/`finish()` keep plain `StopResult`. `lifecycle.py`'s
+  `_handshake()` now returns a bare `StopResult` and no longer builds
+  `prefix_lines` text itself — `_run()`/`_connect()` wrap its result into the
+  richer type afterward, carrying `spawned_pid`/`connected_to`/
+  `killed_previous` as real fields instead of only inside the `prefix` string
+  (which the two subclasses still compute, for the repr).
+- **Built: `StopResult` carries the source line it stopped at.**
+  `execution.py`'s `report_stop()` calls a new `_source_line_at(top_frame)`
+  that reads the one line at the frame's `path:line` and wraps it in a
+  one-entry `model.SourceLines` — gdb's convention, not a window (`ls()` is
+  still how to get one). Degrades to `source=None` on any `OSError` or a
+  frame with no source path, never fails the stop itself. `RunResult`/
+  `ConnectResult` forward it too, so the initial stop after `run()`/
+  `connect()` shows it as well. Regression tests:
+  `test_stop_result_carries_the_single_source_line_when_reachable` and
+  `test_stop_result_source_is_none_when_the_file_is_not_reachable` in
+  `pdvp/test/test_execution.py`.
+- **Built: `model.Breakpoints` is a real `dict[int, Breakpoint]` subclass.**
+  `commands/breakpoints.py`'s `breakpoints()` now returns
+  `model.Breakpoints(SESSION.Breakpoints)` instead of the bare dict; the
+  file-grouped, function-breakpoint-listing `__repr__` is computed on demand
+  from each `Breakpoint`'s own `isinstance`/fields (files sorted by path,
+  each file's breakpoints sorted by line) rather than tracked as separate
+  constructor arguments. No exception-filter section anymore — `catch()`
+  doesn't exist yet, so there was nothing real to display there. Tests:
+  `pdvp/test/test_breakpoints.py`'s `breakpoints()` section.
+- **Built: the `Error` taxonomy — hybrid `ErrorKind` enum + two typed
+  subclasses.** `model.py` gained `ErrorKind` (20 members covering every
+  distinct failure the command surface returns — not connected, already
+  connected, no current thread/frame/file, thread running, no such
+  thread/frame, no frames, no jump target, program not running, resume in
+  flight, no script, no active session, launch failed, handshake failed,
+  source unavailable, line number required, stale frame, pydevd refused)
+  and `Error.kind`, now a
+  **required** keyword-only field — `Error(message)` without `kind=` raises
+  `TypeError`, deliberately: no silent "uncategorized" default to make it
+  easy to skip. Two kinds carry real structured data instead of just the
+  tag: `StaleFrameError(thread_id, stale_epoch, current_epoch)` (from
+  `session.py`'s `require_frame()`) and `PydevdRefused(message, cause=None)`
+  (`cause` is the underlying `dap.DAPError` when there was one, `None` for a
+  `success=False` response with no exception) — both subclass `Error`, so
+  `isinstance(x, Error)`/the falsy contract are unchanged everywhere that
+  already relies on them. Every `Error(...)`/former bare-`DAPError`-message
+  call site across `session.py` and every `commands/*.py` module now passes
+  a kind or is one of the two subclasses — audited exhaustively, not
+  spot-checked (see `pdvp/test/test_model.py` for the taxonomy's own
+  contract tests, and the strengthened stale-frame/DAPError tests in
+  `test_execution.py`/`test_inspect.py`). One incidental fix found while
+  auditing: `jump()` (`execution.py`) had a dead `try/except DAPError`
+  around its `resume()` call — `resume()` itself stopped being able to raise
+  `DAPError` when `_issue()` was fixed earlier this session (see the
+  `DAPError`-leak entry above), so the outer catch was unreachable; removed.
 
 One caveat from this section is still real and worth keeping, moved here rather
 than filed as unmigrated: the control right is taken before the resume request

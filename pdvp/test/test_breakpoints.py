@@ -8,13 +8,6 @@ Same harness as test_execution.py, imported rather than duplicated: a
 at import time (breakpoints.py, location.py, ...). See that module's docstring
 for why the scan exists rather than a maintained list.
 
-Several tests below pin *current* behavior of `breakpoints.py` that is
-inconsistent with the rest of the command surface -- unlike `inspect_.py` and
-`lifecycle.py`, nothing here catches `DAPError` or a failed response into an
-`Error(...)`. That's a known, already-recorded gap (doc/architecture.md, §9),
-not something these tests are meant to endorse; they exist so a future fix
-changes an assertion here on purpose instead of by surprise.
-
 No test framework dependency: each test_* function takes no arguments, raises
 AssertionError on failure, and the __main__ runner reports pass/fail for all of
 them. pytest also collects these directly by name.
@@ -218,27 +211,23 @@ def test_commit_no_ops_without_a_client() -> None:
         restore()
 
 
-def test_commit_source_breakpoints_raises_on_a_failed_response() -> None:
-    """Pins current behavior: unlike inspect_.py/lifecycle.py, breakpoints.py
-    does not turn a failed response into Error(...) -- see the module
-    docstring and doc/architecture.md §9."""
+def test_commit_source_breakpoints_returns_error_on_a_failed_response() -> None:
     session, client, restore = _new_session_env()
     try:
         _connect(session, client)
 
         def failed(source, sbreakpoints):
             client._record("set_breakpoints", len(sbreakpoints))
-            return _Response(success=False)
+            return _Response(success=False, message="nope")
         client.set_breakpoints = failed
 
-        assert _raises(model.PDVPError, breakpoints.sbreak, "fail.py", 1)
+        result = breakpoints.sbreak("fail.py", 1)
+        assert isinstance(result, model.Error), result
     finally:
         restore()
 
 
-def test_commit_source_breakpoints_propagates_a_dap_error() -> None:
-    """Same gap as above, the DAPError-raising side of it: sbreak() has no
-    try/except around the client call at all."""
+def test_commit_source_breakpoints_returns_error_on_a_dap_error() -> None:
     session, client, restore = _new_session_env()
     try:
         _connect(session, client)
@@ -248,7 +237,9 @@ def test_commit_source_breakpoints_propagates_a_dap_error() -> None:
             raise _dap.DAPError("pydevd is gone")
         client.set_breakpoints = blows_up
 
-        assert _raises(_dap.DAPError, breakpoints.sbreak, "boom.py", 1)
+        result = breakpoints.sbreak("boom.py", 1)
+        assert isinstance(result, model.Error), result
+        assert "pydevd is gone" in result
     finally:
         restore()
 
@@ -352,6 +343,56 @@ def test_a_breakpoint_set_on_one_caller_thread_is_visible_to_commit_all_elsewher
 
         source_calls = client.calls_for("set_breakpoints")
         assert len(source_calls) == 1 and source_calls[0][1] == (1,)
+    finally:
+        restore()
+
+
+# ============================================================ breakpoints()
+
+def test_breakpoints_is_the_session_dict_wrapped_not_copied() -> None:
+    """model.Breakpoints is a dict subclass over SESSION.Breakpoints's own
+    mapping -- one source of truth, per doc/architecture.md's redesign
+    section. breakpoints() constructs a fresh wrapper each call, but its
+    contents are the very same Breakpoint objects, not copies."""
+    session, client, restore = _new_session_env()
+    try:
+        bp = breakpoints.sbreak("a.py", 1)
+
+        result = breakpoints.breakpoints()
+        assert isinstance(result, model.Breakpoints)
+        assert isinstance(result, dict)
+        assert len(result) == 1
+        assert result[bp.ID] is bp
+    finally:
+        restore()
+
+
+def test_breakpoints_repr_is_empty_with_none_set() -> None:
+    session, client, restore = _new_session_env()
+    try:
+        assert repr(breakpoints.breakpoints()) == "no breakpoints set"
+    finally:
+        restore()
+
+
+def test_breakpoints_repr_groups_by_file_sorted_by_line_then_lists_functions() -> None:
+    session, client, restore = _new_session_env()
+    try:
+        breakpoints.sbreak("b.py", 9)
+        breakpoints.sbreak("a.py", 2, condition="x > 1")
+        breakpoints.sbreak("a.py", 1)
+        breakpoints.fbreak("myfunc", condition="y")
+        breakpoints.disable(list(session.Breakpoints)[0])  # first sbreak: b.py:9
+
+        text = repr(breakpoints.breakpoints())
+        lines = text.splitlines()
+
+        assert lines == [
+            "a.py:1 [enabled]",
+            "a.py:2 [enabled] (condition='x > 1')",
+            "b.py:9 [disabled]",
+            "function myfunc [enabled] (condition='y')",
+        ], text
     finally:
         restore()
 

@@ -1,5 +1,5 @@
 """Unit tests for `commands/inspect_.py`: p, locals, globals_, setvar, whatis,
-display/undisplay, exception_info, completions.
+exception_info, completions.
 
 No pydevd, no sockets -- same `FakeClient`-plus-`sys.modules`-scan harness as
 `test_execution.py`; see that file's module docstring for why the scan exists.
@@ -15,7 +15,6 @@ import importlib
 import sys
 
 inspect_ = importlib.import_module("pdvp.commands.inspect_")
-execution = importlib.import_module("pdvp.commands.execution")
 from ..model import CompletionList, Error, ExceptionInfo, Scope, Status
 from ..session import SESSION as _REAL_SESSION
 from ..session import Session
@@ -269,64 +268,6 @@ def test_completions_happy_path_returns_the_targets() -> None:
         restore()
 
 
-# ================================================================ display()
-
-def test_display_id_allocation_is_monotonic_even_after_a_removal() -> None:
-    session, client, restore = _new_session_env()
-    try:
-        first = inspect_.display("1 + 1")
-        assert first.startswith("1:"), first
-        second = inspect_.display("2 + 2")
-        assert second.startswith("2:"), second
-
-        assert not isinstance(inspect_.undisplay(1), Error)
-
-        third = inspect_.display("3 + 3")
-        assert third.startswith("3:"), (
-            "id 1 was freed by undisplay() but must not be reused", third)
-    finally:
-        restore()
-
-
-def test_display_echoes_immediately_only_when_currently_stopped() -> None:
-    session, client, restore = _new_session_env()
-    try:
-        # Not connected at all: no immediate echo, just the registration line.
-        result = inspect_.display("1 + 1")
-        assert result == "1: 1 + 1", result
-        assert client.calls == []
-
-        _stopped_at_a_frame(session, client)
-        result = inspect_.display("2 + 2")
-        lines = result.splitlines()
-        assert lines[0] == "2: 2 + 2", lines
-        assert len(lines) == 2, "must echo the evaluated value once stopped"
-        assert client.calls == ["evaluate"]
-    finally:
-        restore()
-
-
-def test_undisplay_unknown_id_is_an_error() -> None:
-    session, client, restore = _new_session_env()
-    try:
-        result = inspect_.undisplay(999)
-        assert isinstance(result, Error), result
-    finally:
-        restore()
-
-
-def test_display_lines_hook_is_registered_exactly_once() -> None:
-    """`inspect_.py` does `execution.stop_report_lines.append(_display_lines)`
-    at module scope, which only runs once per process since `importlib` caches
-    the module -- but that's an assumption worth pinning rather than trusting.
-    (Forcing an `importlib.reload()` here to actually probe the "what if it's
-    imported twice" case is unsafe: this module is shared with every other
-    test file in the same process, and reloading it would rebind `SESSION` in
-    ways that could break tests running around this one. Left unprobed.)
-    """
-    matches = [hook for hook in execution.stop_report_lines if hook is inspect_._display_lines]
-    assert len(matches) == 1, execution.stop_report_lines
-
 
 # ======================================================== exception_info()
 #
@@ -340,13 +281,18 @@ def test_display_lines_hook_is_registered_exactly_once() -> None:
 
 def test_exception_info_dap_error_path_still_returns_a_clean_error() -> None:
     from .. import dap as _dap
+    from ..model import ErrorKind, PydevdRefused
     session, client, restore = _new_session_env()
     try:
         _stopped_at_a_frame(session, client)
-        client.raise_on["exception_info"] = _dap.DAPError("no exception on this thread")
+        cause = _dap.DAPError("no exception on this thread")
+        client.raise_on["exception_info"] = cause
         result = inspect_.exception_info()
         assert isinstance(result, Error), result
         assert "no exception on this thread" in result, result
+        assert isinstance(result, PydevdRefused), result
+        assert result.kind is ErrorKind.PYDEVD_REFUSED
+        assert result.cause is cause
     finally:
         restore()
 
