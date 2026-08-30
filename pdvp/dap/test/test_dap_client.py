@@ -1,8 +1,11 @@
-"""End-to-end tests for the v1 DAP client against real pydevd instances.
+"""End-to-end tests for Client's method surface against a real pydevd --
+the DAP requests test_client_events.py doesn't touch (it exercises the event
+bus itself: death, matching, family subscriptions). Together the two files
+cover the whole of Layer 1.
 
 No test framework dependency: each test_* function takes no arguments, raises
 AssertionError on failure, and the __main__ runner reports pass/fail for all
-of them.
+of them. pytest also collects these directly by name.
 
 Run from the repo root with the venv active:
 
@@ -10,6 +13,8 @@ Run from the repo root with the venv active:
 """
 import os
 
+from ... import events
+from ...schema import pydevd_schema as schema
 from ..client import DAPError
 from .helpers import attach_and_configure, session
 
@@ -17,182 +22,182 @@ TARGETS = os.path.join(os.path.dirname(__file__), "targets")
 CALC = os.path.join(TARGETS, "calc.py")
 LOOP = os.path.join(TARGETS, "loop.py")
 
-
-def test_session_lifecycle() -> None:
-    with session(LOOP) as client:
-        attach_and_configure(client)
-
-        threads = client.threads()
-        assert len(threads["threads"]) >= 1, threads
-
-        client.disconnect(terminate_debuggee=True)
+# Every wait here is armed before the thing that triggers it, so these bound a
+# failure rather than a race. Nothing inside pdvp passes a timeout.
+WAIT = 10
 
 
 def test_line_breakpoint_and_inspection() -> None:
-    with session(CALC) as client:
-        attach_and_configure(client, breakpoints={CALC: [{"line": 2}]})  # `c = a + b` in inner()
+    with session(CALC) as (client, bus):
+        with bus.subscribe(events.Stopped) as stops:
+            attach_and_configure(client, bus, breakpoints={CALC: [{"line": 2}]})  # `c = a + b` in inner()
+            stopped = stops.get(timeout=WAIT)
 
-        stopped = client.wait_for_event("stopped", timeout=10)
-        assert stopped["reason"] == "breakpoint", stopped
-        thread_id = stopped["threadId"]
+        assert stopped.reason == "breakpoint", stopped
+        thread_id = stopped.thread_id
 
-        trace = client.stack_trace(thread_id)
-        top = trace["stackFrames"][0]
+        trace = client.stack_trace(thread_id).body
+        top = trace.stackFrames[0]
         assert top["name"] == "inner", trace
         frame_id = top["id"]
 
-        scopes = client.scopes(frame_id)["scopes"]
+        scopes = client.scopes(frame_id).body.scopes
         locals_ref = scopes[0]["variablesReference"]
 
-        variables = {v["name"]: v["value"] for v in client.variables(locals_ref)["variables"]}
+        variables = {v["name"]: v["value"] for v in client.variables(locals_ref).body.variables}
         assert variables["a"] == "1", variables
         assert variables["b"] == "2", variables
 
         result = client.evaluate("a + b", frame_id=frame_id)
-        assert result["result"] == "3", result
+        assert result.body.result == "3", result
 
         client.set_variable(locals_ref, "a", "100")
         result = client.evaluate("a + b", frame_id=frame_id)
-        assert result["result"] == "102", result
+        assert result.body.result == "102", result
 
         client.set_expression("b", "5", frame_id=frame_id)
         result = client.evaluate("a + b", frame_id=frame_id)
-        assert result["result"] == "105", result
+        assert result.body.result == "105", result
 
         client.continue_(thread_id)
 
 
 def test_step_commands() -> None:
-    with session(CALC) as client:
-        attach_and_configure(client, breakpoints={CALC: [{"line": 9}]})  # `z = inner(x, y)` in outer()
+    with session(CALC) as (client, bus):
+        with bus.subscribe(events.Stopped) as stops:
+            attach_and_configure(client, bus, breakpoints={CALC: [{"line": 9}]})  # `z = inner(x, y)` in outer()
+            stopped = stops.get(timeout=WAIT)
+            assert stopped.reason == "breakpoint", stopped
+            thread_id = stopped.thread_id
 
-        stopped = client.wait_for_event("stopped", timeout=10)
-        assert stopped["reason"] == "breakpoint", stopped
-        thread_id = stopped["threadId"]
+            client.step_in(thread_id)
+            stopped = stops.get(timeout=WAIT)
+            assert stopped.reason == "step", stopped
+            trace = client.stack_trace(thread_id).body
+            assert trace.stackFrames[0]["name"] == "inner", trace
 
-        client.step_in(thread_id)
-        stopped = client.wait_for_event("stopped", timeout=10)
-        assert stopped["reason"] == "step", stopped
-        trace = client.stack_trace(thread_id)
-        assert trace["stackFrames"][0]["name"] == "inner", trace
+            client.step_out(thread_id)
+            stopped = stops.get(timeout=WAIT)
+            assert stopped.reason == "step", stopped
+            trace = client.stack_trace(thread_id).body
+            assert trace.stackFrames[0]["name"] == "outer", trace
 
-        client.step_out(thread_id)
-        stopped = client.wait_for_event("stopped", timeout=10)
-        assert stopped["reason"] == "step", stopped
-        trace = client.stack_trace(thread_id)
-        assert trace["stackFrames"][0]["name"] == "outer", trace
-
-        client.next(thread_id)
-        stopped = client.wait_for_event("stopped", timeout=10)
-        assert stopped["reason"] == "step", stopped
-        trace = client.stack_trace(thread_id)
-        assert trace["stackFrames"][0]["name"] == "outer", trace
+            client.next(thread_id)
+            stopped = stops.get(timeout=WAIT)
+            assert stopped.reason == "step", stopped
+            trace = client.stack_trace(thread_id).body
+            assert trace.stackFrames[0]["name"] == "outer", trace
 
         client.continue_(thread_id)
 
 
 def test_function_breakpoints() -> None:
-    with session(CALC) as client:
-        client.initialize()
-        client.attach()
-        client.wait_for_event("initialized", timeout=5)
+    with session(CALC) as (client, bus):
+        with bus.subscribe(events.Initialized) as initialized, \
+             bus.subscribe(events.Stopped) as stops:
+            client.initialize()
+            client.attach()
+            assert isinstance(initialized.get(timeout=WAIT), events.Initialized)
 
-        client.set_function_breakpoints([{"name": "inner"}])
-        client.set_exception_breakpoints([], [], [])
-        client.configuration_done()
+            client.set_function_breakpoints([schema.FunctionBreakpoint("inner", None, None)])
+            client.set_exception_breakpoints([], [], [])
+            client.configuration_done()
 
-        stopped = client.wait_for_event("stopped", timeout=10)
-        assert stopped["reason"] == "function breakpoint", stopped
-        thread_id = stopped["threadId"]
+            stopped = stops.get(timeout=WAIT)
 
-        trace = client.stack_trace(thread_id)
-        assert trace["stackFrames"][0]["name"] == "inner", trace
+        assert stopped.reason == "function breakpoint", stopped
+        thread_id = stopped.thread_id
+
+        trace = client.stack_trace(thread_id).body
+        assert trace.stackFrames[0]["name"] == "inner", trace
 
         client.continue_(thread_id)
 
 
 def test_exception_breakpoints_and_info() -> None:
-    with session(CALC) as client:
-        attach_and_configure(client, exception_filters=["raised"])
+    with session(CALC) as (client, bus):
+        with bus.subscribe(events.Stopped) as stops:
+            attach_and_configure(client, bus, exception_filters=["raised"])
+            stopped = stops.get(timeout=WAIT)
 
-        stopped = client.wait_for_event("stopped", timeout=10)
-        assert stopped["reason"] == "exception", stopped
-        thread_id = stopped["threadId"]
+        assert stopped.reason == "exception", stopped
+        thread_id = stopped.thread_id
 
-        info = client.exception_info(thread_id)
-        assert "ValueError" in info["exceptionId"], info
-        assert "boom" in (info.get("description") or ""), info
+        info = client.exception_info(thread_id).body
+        assert "ValueError" in info.exceptionId, info
+        assert "boom" in (info.description or ""), info
 
         client.continue_(thread_id)
 
 
 def test_pause() -> None:
-    with session(LOOP) as client:
-        attach_and_configure(client)
+    with session(LOOP) as (client, bus):
+        attach_and_configure(client, bus)
 
-        threads = client.threads()["threads"]
+        threads = client.threads().body.threads
         thread_id = threads[0]["id"]
 
-        client.pause(thread_id)
-        stopped = client.wait_for_event("stopped", timeout=10)
-        assert stopped["reason"] == "pause", stopped
+        with bus.subscribe(events.Stopped) as stops:
+            client.pause(thread_id)
+            stopped = stops.get(timeout=WAIT)
+        assert stopped.reason == "pause", stopped
 
         client.continue_(thread_id)
 
 
 def test_pydevd_system_info() -> None:
-    with session(LOOP) as client:
-        attach_and_configure(client)
+    with session(LOOP) as (client, bus):
+        attach_and_configure(client, bus)
 
-        info = client.pydevd_system_info()
-        assert info["process"]["pid"] > 0, info
+        info = client.pydevd_system_info().body
+        assert info.process.pid > 0, info
 
         client.disconnect(terminate_debuggee=True)
 
 
 def test_pydevd_authorize() -> None:
-    with session(LOOP) as client:
-        attach_and_configure(client)
+    with session(LOOP) as (client, bus):
+        attach_and_configure(client, bus)
 
-        info = client.pydevd_authorize()
-        assert info["clientAccessToken"] is None, info
+        info = client.pydevd_authorize().body
+        assert info.clientAccessToken is None, info
 
         client.disconnect(terminate_debuggee=True)
 
 
 def test_modules() -> None:
-    with session(LOOP) as client:
-        attach_and_configure(client)
+    with session(LOOP) as (client, bus):
+        attach_and_configure(client, bus)
 
-        modules = client.modules()
-        assert isinstance(modules["modules"], list), modules
+        modules = client.modules().body.modules
+        assert isinstance(modules, list), modules
 
         client.disconnect(terminate_debuggee=True)
 
 
 def test_set_debugger_property() -> None:
-    with session(LOOP) as client:
-        attach_and_configure(client)
+    with session(LOOP) as (client, bus):
+        attach_and_configure(client, bus)
 
-        result = client.set_debugger_property(multiThreadsSingleNotification=True)
-        assert result == {}, result
+        result = client.set_debugger_property(multi_threads_single_notification=True)
+        assert result.success, result
 
         client.disconnect(terminate_debuggee=True)
 
 
 def test_set_pydevd_source_map() -> None:
-    with session(CALC) as client:
-        attach_and_configure(client)
+    with session(CALC) as (client, bus):
+        attach_and_configure(client, bus)
 
-        result = client.set_pydevd_source_map({"path": CALC}, [])
-        assert result == {}, result
+        result = client.set_pydevd_source_map(schema.Source(path=CALC), [])
+        assert result.success, result
 
         client.disconnect(terminate_debuggee=True)
 
 
 def test_source_invalid_reference() -> None:
-    with session(LOOP) as client:
-        attach_and_configure(client)
+    with session(LOOP) as (client, bus):
+        attach_and_configure(client, bus)
 
         try:
             client.source(0)
@@ -205,86 +210,70 @@ def test_source_invalid_reference() -> None:
 
 
 def test_completions() -> None:
-    with session(CALC) as client:
-        attach_and_configure(client, breakpoints={CALC: [{"line": 2}]})  # `c = a + b` in inner()
+    with session(CALC) as (client, bus):
+        with bus.subscribe(events.Stopped) as stops:
+            attach_and_configure(client, bus, breakpoints={CALC: [{"line": 2}]})  # `c = a + b` in inner()
+            stopped = stops.get(timeout=WAIT)
 
-        stopped = client.wait_for_event("stopped", timeout=10)
-        thread_id = stopped["threadId"]
-        frame_id = client.stack_trace(thread_id)["stackFrames"][0]["id"]
+        thread_id = stopped.thread_id
+        frame_id = client.stack_trace(thread_id).body.stackFrames[0]["id"]
 
-        result = client.completions("a", 2, frame_id=frame_id)
-        names = {t["text"] if "text" in t else t["label"] for t in result["targets"]}
-        assert "a" in names, result
+        result = client.completions("a", 2, frame_id=frame_id).body
+        names = {t["text"] if "text" in t else t["label"] for t in result.targets}
+        assert "a" in names, result.targets
 
         client.continue_(thread_id)
 
 
 def test_step_in_targets() -> None:
-    with session(CALC) as client:
-        attach_and_configure(client, breakpoints={CALC: [{"line": 9}]})  # `z = inner(x, y)` in outer()
+    with session(CALC) as (client, bus):
+        with bus.subscribe(events.Stopped) as stops:
+            attach_and_configure(client, bus, breakpoints={CALC: [{"line": 9}]})  # `z = inner(x, y)` in outer()
+            stopped = stops.get(timeout=WAIT)
 
-        stopped = client.wait_for_event("stopped", timeout=10)
-        thread_id = stopped["threadId"]
-        frame_id = client.stack_trace(thread_id)["stackFrames"][0]["id"]
+        thread_id = stopped.thread_id
+        frame_id = client.stack_trace(thread_id).body.stackFrames[0]["id"]
 
-        result = client.step_in_targets(frame_id)
-        assert len(result["targets"]) >= 1, result
+        result = client.step_in_targets(frame_id).body
+        assert len(result.targets) >= 1, result.targets
 
         client.continue_(thread_id)
 
 
 def test_goto() -> None:
-    with session(CALC) as client:
-        attach_and_configure(client, breakpoints={CALC: [{"line": 9}]})  # `z = inner(x, y)` in outer()
+    with session(CALC) as (client, bus):
+        with bus.subscribe(events.Stopped) as stops:
+            attach_and_configure(client, bus, breakpoints={CALC: [{"line": 9}]})  # `z = inner(x, y)` in outer()
+            stopped = stops.get(timeout=WAIT)
+            thread_id = stopped.thread_id
 
-        stopped = client.wait_for_event("stopped", timeout=10)
-        thread_id = stopped["threadId"]
+            targets = client.goto_targets(schema.Source(path=CALC), 7).body.targets  # `x = 1` in outer()
+            target_id = targets[0]["id"]
 
-        targets = client.goto_targets({"path": CALC}, 7)["targets"]  # `x = 1` in outer()
-        target_id = targets[0]["id"]
-
-        client.goto(thread_id, target_id)
-        stopped = client.wait_for_event("stopped", timeout=10)
-        assert stopped["reason"] == "goto", stopped
+            client.goto(thread_id, target_id)
+            stopped = stops.get(timeout=WAIT)
+            assert stopped.reason == "goto", stopped
 
         client.continue_(thread_id)
 
 
-TESTS = [
-    test_session_lifecycle,
-    test_line_breakpoint_and_inspection,
-    test_step_commands,
-    test_function_breakpoints,
-    test_exception_breakpoints_and_info,
-    test_pause,
-    test_pydevd_system_info,
-    test_pydevd_authorize,
-    test_modules,
-    test_set_debugger_property,
-    test_set_pydevd_source_map,
-    test_source_invalid_reference,
-    test_completions,
-    test_step_in_targets,
-    test_goto,
-]
+TESTS = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
 
 
-def main() -> None:
-    failures = []
+def main() -> int:
+    failures = 0
     for test in TESTS:
-        print(f"{test.__name__} ... ", end="", flush=True)
         try:
             test()
-        except Exception as e:
-            print(f"FAIL: {e!r}")
-            failures.append(test.__name__)
+        except Exception as error:
+            failures += 1
+            print(f"FAIL {test.__name__}: {type(error).__name__}: {error}")
         else:
-            print("ok")
-
-    if failures:
-        raise SystemExit(f"{len(failures)} test(s) failed: {', '.join(failures)}")
-    print("all tests passed")
+            print(f"ok   {test.__name__}")
+    print(f"\n{len(TESTS) - failures}/{len(TESTS)} passed")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())

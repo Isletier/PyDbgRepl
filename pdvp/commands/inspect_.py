@@ -115,7 +115,7 @@ def exception_info(*, thread: int | None = None) -> ExceptionInfo | Error:
     except _dap.DAPError as e:
         return Error(str(e))
 
-    return ExceptionInfo(info)
+    return ExceptionInfo(info.body.to_dict())
 
 
 def completions(text: str, column: int) -> CompletionList | Error:

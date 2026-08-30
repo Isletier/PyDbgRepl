@@ -15,7 +15,7 @@ def modules() -> ModuleList | Error:
         result = SESSION.client.modules()
     except _dap.DAPError as e:
         return Error(str(e))
-    return ModuleList(result.get("modules", []))
+    return ModuleList(result.body.modules)
 
 
 def pydevd_info() -> InfoSections | Error:
@@ -27,4 +27,4 @@ def pydevd_info() -> InfoSections | Error:
         result = SESSION.client.pydevd_system_info()
     except _dap.DAPError as e:
         return Error(str(e))
-    return InfoSections(result)
+    return InfoSections(result.body.to_dict())

@@ -321,11 +321,19 @@ epoch has moved.
 |---|---|
 | `stopped(tid, allThreadsStopped)` | mark `tid` (or all) stopped, record reason |
 | resume request sent | bump epoch optimistically for the threads we expect to resume |
-| `continue` response `allThreadsContinued` | reconcile the optimistic bump |
 | `continued` event | mark running, bump if not already |
 | `thread` started/exited | add/remove from the table |
 | `exited` / `terminated` | process-lifetime reset |
 | `disconnected` | connection-lifetime reset |
+
+The `continue` response itself is not part of this table: `_issue()` discards
+`request(SESSION.client)`'s return value entirely, so `allThreadsContinued` on
+the response is never read. Reconciliation happens exactly once, through the
+`continued` event and the per-thread `pending_resume` flag — if the epoch was
+already bumped at send, the event just clears the flag; if it wasn't (a resume
+we didn't issue), the event bumps it then. The response was never load-bearing;
+an earlier draft of this table implied a second reconciliation point that the
+code doesn't have and doesn't need.
 
 The reducer cannot ask pydevd anything, so the one thing it cannot do for
 itself — reconcile the table against a `threads` response — is fed back by the
@@ -633,6 +641,14 @@ old behaviour and produce a hybrid — new stops reported one way, old breakpoin
 suspending the other. `commit_all()` already does the second half. None of this
 reaches the command surface; it is what the one command does internally.
 
+Both steps, plus the precondition check itself, run under the control right
+(§4), held for `None` — every thread — for the same reason an all-stop resume
+holds it there: the check and the flip have to be atomic against a concurrent
+`cont()`/`step()`/etc., or a resume from another caller can land in the gap and
+produce the exact hybrid this procedure exists to prevent. This makes the mode
+switch a state-changing command like any other, not a special case bolted on
+beside them.
+
 ---
 
 ## 4. Concurrent callers and the thread control right
@@ -644,9 +660,16 @@ relates to that:
 
 | Class | Operations | Requires |
 |---|---|---|
-| **state-changing** | `continue`, `step`/`next`/`finish`, `pause`, `goto` | the control right |
+| **state-changing** | `continue`, `step`/`next`/`finish`, `pause`, `goto`, the mode switch (`non_stop()`) | the control right (`pause` exempt — see below) |
 | **frame-scoped reads** | `stackTrace`, `scopes`, `variables`, `evaluate`, `exceptionInfo` | the thread stopped |
 | **state-independent** | `threads`, `setBreakpoints`, `modules`, `loadedSources`, `disconnect` | nothing |
+
+The mode switch belongs in this row, not off to the side as a configuration
+concern: `config.non_stop` is only ever the default the *next* `run()`/`connect()`
+attaches with (§3); once connected, changing the live mode is a command that
+mutates the run state every other row in this table protects, and it is keyed
+and guarded exactly like one — `None` (every thread), the same key an all-stop
+resume already uses.
 
 ### Why a right is needed at all
 
@@ -765,6 +788,18 @@ What the hold guarantees, then, is narrow and deliberate: it prevents the
 Past that we assume the person writing automation — the user themselves, or a
 plugin author they chose to trust — knows what their code does. That assumption
 is what licenses us to not build ownership, revocation, stealing, or a `release()`.
+
+The same assumption rejects a second alternative for the same reason: forcing
+every state-changing command through a wrapper that *requires* a key, so a new
+one cannot be written without acquiring the right. It would have caught a real
+bug once (§9 tracked it before the fix landed), but it optimizes for the wrong
+threat model — protecting commands from each other — when the one this section
+actually protects against is the silent double-resume, and the realistic
+callers (Usability, above) are cooperative, not adversarial. Ceremony aimed
+at a caller who isn't there is exactly the tax the paragraph above declines to
+pay. The fix that was actually needed was smaller: the one command that was
+supposed to already follow this section's convention and didn't (`non_stop()`)
+now does, same as every other row in the table above.
 
 ### Automation and reporting
 
@@ -920,74 +955,273 @@ generic "absent is false" helper gets the second one backwards.
 
 ## 9. Open
 
-- What `Resumption` looks like at the prompt, and whether there is an explicit
-  `wait(tid)` command alongside it. It is reachable in both modes now (§3), so
-  this is no longer a non-stop-only question.
-- Whether a stop that resolved nobody's wait needs anything beyond an
-  announcement — it moves no cursor, and in non-stop it is the normal way a
-  second thread reports a breakpoint.
 - Whether `before_prompt` becomes a real hook or stays out of the event model.
-- Who fills `SessionEnded.exit_code`. pydevd never sends `exited` (§8), so it can
-  only come from the process we spawned — which means the layer that owns the
-  child has to reach the ending, or the field stays None for a normal exit.
-- Stdin passthrough is still scoped to a blocking resume wait; it needs the
-  foreground/background model and a single-owner terminal in Console. `doc/io_model.md`
-  still describes the old mechanism.
-- `cont(all=...)` has no meaning in all-stop, since pydevd discards the
-  `threadId`. It must refuse rather than silently no-op.
+- **`SessionEnded.exit_code` is still unfilled for the common case.** pydevd
+  never sends `exited` (§8), so the only wire path in `events.py` (`"exited":
+  ... exit_code=_field(body, "exitCode")`) never fires in practice. `end_process()`
+  (session.py) calls `self.process.child.wait()` on the process we spawned but
+  discards the return code — it never reaches `SessionEnded`. The layer that
+  owns the child still has to carry that value into the ending; nothing does
+  yet, so the field stays `None` for a normal exit.
 - **Composite commands.** `until()` was a temporary breakpoint, a `cont()` and a
   clear — three round trips presented as one command, and it was removed rather
   than kept working by accident. What such a command means when it is
   interrupted halfway, and who owns the state it leaves behind, needs deciding
   before any of them come back.
+- **`threads()`'s auto-select cursor side effect.** `commands/stack.py` sets
+  `SESSION.current_thread_id = thread_list[0]["id"]` when the caller has no
+  cursor yet — but per §2, setting a cursor detaches that caller from the
+  `_last_stopped` fallback *permanently*, and the doc is explicit that no
+  command should do this passively ("this is not a convenience"). Currently
+  dead in practice, since `_handshake()` always blocks for an initial stop
+  before returning control, so `current_thread_id` is never `None` by the time
+  a caller can reach `threads()`. Worth deleting the auto-select (or reading
+  `_last_stopped` directly for display) so the behavior matches the invariant
+  it currently only violates by accident of call order.
+- **The package doesn't import on Windows.** `launch.py` (`import pty`) and
+  `console.py` (`import readline`, `import termios`, `import tty`) all import
+  these POSIX-only stdlib modules unconditionally at module scope, with no
+  `sys.platform`/`os.name` branching anywhere in the codebase. Both sit in the
+  middle of the import graph, not off to the side — `session.py` imports
+  `launch`, and `commands/execution.py`/`lifecycle.py` import from `console`
+  — so `import pdvp` itself fails on Windows with `ModuleNotFoundError`
+  before any pdvp code runs, not just the PTY-passthrough feature
+  degrading. Not a priority right now; noted so it isn't rediscovered from
+  scratch later. If it becomes one, the cheap first step is making the two
+  imports lazy/guarded so the package is at least importable, with the
+  PTY-dependent features (owned-PTY passthrough, `run()`'s default
+  stdin/stdout/stderr) failing with a clear error on Windows rather than
+  `ModuleNotFoundError` — real terminal support (msvcrt/ConPTY) is a
+  separate, much larger effort.
+- Whether `model.py`'s result objects should also grow methods (not just
+  fields) for pleasant non-REPL/scripting use, and whether `InfoSections`/
+  `ExceptionInfo` should keep the real schema object instead of the current
+  `.body.to_dict()` flattening — the two pieces of the output/return-type
+  redesign (see "Decided, not yet built" below) not yet resolved. Also
+  unresolved: a broader audit for exceptions other than `DAPError` escaping
+  the command surface where they shouldn't (§ below, point 2) — real
+  implementation-time work, not started.
 
-### Not yet migrated
+### Decided, not yet built: the output/return-type redesign
 
-Layers 0–3 are built to this document. Layer 4 waits on the bus — the
-`wait_for_event`/`client.events`/`on_disconnect` call sites are gone, replaced
-by `_internal._resume()`, which arms a `bus.subscribe(Stopped)` before it sends
-the request that resumes — and reads through Session's guards.
+A design pass on `model.py`'s result types and the core/extra package split,
+across several conversations — decided, but none of it implemented yet.
+`StopResult`'s `prefix`/`suffix` string-splicing and `Status` (currently just
+a falsy-aware `str`) are the symptom that started it: ad hoc stringification
+standing in for real fields.
 
-The **thread control right** (§4) is built: `Session.ControlRights`, acquired in
-`_internal._resume()` — the single site every state-changing command routes
-through — and held from the send until the stop. `control()` is the same
-primitive held across a sequence. The key is the thread id, or `None` for every
-thread, which is already what a resume that names no thread passes, so nothing
-chooses between the two.
+1. **`stop_report_lines`/`display()` — removed, not relocated.**
+   `stop_report_lines` (the hook `display()` registers into,
+   `commands/execution.py`) only ever fires for a resume the calling context
+   itself initiated and is blocked on — `report_stop()` is only reached from
+   `Resumption.wait()`. Every other stop (`lifecycle._dispatch()`'s
+   `not SESSION.stop_is_awaited(event)` branch — the normal case of a
+   *different* thread stopping in non-stop mode) is a bare `print_async`
+   announcement, no `stop_report_lines` involved. So `display()`'s
+   gdb-inherited promise — "show me this after every stop" — already failed
+   for exactly the case a human couldn't just retype `p()` themselves; it
+   only fired where doing that manually cost nothing anyway. Its payload
+   (`f"{id}: {expr} = {value}"`) is pre-formatted display text, not data, so
+   it served no scripting need either way. Not worth a core hook. If kept,
+   it's a three-line wrapper living entirely in extra.
+2. **Errors are return values, never raised, except for genuine program
+   invariant violations.** Same shape as Rust's `Result<T, E>`/Go's
+   `(value, error)` — reserve `raise` for "this should be impossible if pdvp
+   has no bugs," not for anything externally caused. Makes the `DAPError`
+   leaks in `cont()`/`step()`/`next()`/`finish()`, `breakpoints.py`'s commit
+   functions, and `source.py`'s `_fetch()` unambiguous bugs to fix — not a
+   "maybe intentional" question anymore. A broader audit for *other* stray
+   exceptions (index/key/attribute errors from unexpected-shaped DAP
+   responses) is separate, real work, not started — good fit for the
+   FakeClient harness: feed malformed/edge-shaped responses, confirm `Error`
+   comes back instead of a crash.
+3. **Error taxonomy: a hybrid, not a plain enum or a full subclass
+   hierarchy.** One `Error` base (keeps the existing
+   `isinstance`/falsy contract unchanged), an `ErrorKind` enum tag for the
+   common/uniform kinds (not connected, thread running, ...), plus real
+   typed subclasses for the few kinds that carry genuine extra structured
+   data a type checker should narrow (a stale-frame error's epoch/thread id;
+   a pydevd-refusal error's underlying message). `isinstance`-based category
+   checks work identically whether or not anything is ever raised, so
+   hierarchy depth was never actually tied to the raise-vs-return choice.
+4. **`RunResult`/`ConnectResult` wrap or extend `StopResult` — they do not
+   share one flat type with `cont()`/`step()`/`next()`/`finish()`.**
+   `RunResult` adds `killed_previous`, `spawned_pid`, `connected_to`;
+   `ConnectResult` adds just `connected_to` (`connect()` never spawns or
+   kills anything); the four resume commands keep plain, uncluttered
+   `StopResult`. Concretely motivated by a real duplication already in the
+   code: `_handshake()` threads the spawned pid through two channels today —
+   unstructured text in `run()`'s `prefix_lines` *and* the structured
+   `events.SessionStarted(pid=pid)` — the redesign makes the return value
+   carry it structurally too, not just the event.
+5. **`StopResult` should also carry the source line it stopped at.**
+   `commands/source.py`'s `ls()` already has exactly the machinery needed —
+   reads the file, wraps the result in `model.SourceLines` (a `list`
+   subclass of `(lineno, text)` pairs with a `->` marker on the current
+   line) — so this is reusing an existing type, not inventing one. Two
+   details to settle when this is built, not decided yet: gdb's own
+   convention is a *single* line at a stop (a full window is what `list`/
+   `ls()` is for on demand), and fetching costs a file read (or, for a
+   `sourceReference`-backed source, a round trip through `SESSION.sourceMap`)
+   that should degrade gracefully — never fail the stop itself — if the
+   source isn't reachable.
+6. **`model.Breakpoints` redesign, and the general Python answer to "a nice
+   collection type that's still plain-dict/list-usable."** `model.Breakpoints`
+   is fully written (grouped-by-file `__repr__`) but is dead code —
+   `commands/breakpoints.py`'s `breakpoints()` returns the bare
+   `SESSION.Breakpoints` dict instead (confirmed via grep, zero references
+   to `model.Breakpoints(` anywhere). Decided direction: rebuild it as a
+   `dict[int, Breakpoint]` *subclass* — matching `SESSION.Breakpoints`'s own
+   shape exactly, one source of truth — with the file-grouped display
+   computed on demand in `__repr__`, not stored as the three separately
+   -tracked constructor arguments it takes today. `breakpoints()` becomes
+   `return model.Breakpoints(SESSION.Breakpoints)`. This is the general
+   pattern for "nice collection type usable as the plain builtin" in
+   Python: subclass the builtin container (`pdvp` already does this
+   everywhere — `ThreadList(list)`, `ModuleList(list)`, `InfoSections(dict)`)
+   rather than reaching for a C++-style conversion operator Python doesn't
+   have — the object *is* the dict/list, no separate representation to go
+   stale.
+7. **Exception documentation reframed, not just deprioritized.** Since
+   nothing should raise under normal operation (point 2), `Raises:` isn't
+   the useful thing to document — the useful equivalent is which `Error`
+   *kinds* (point 3) a command can return: `Returns Error(kind=...) when:`
+   instead of `Raises:`.
+8. **Core/extra split — by compositeness, not by ptpython dependency.**
+   Core is the thin one-request-one-response layer plus the machinery that
+   supports it (session, cursor, control rights, event bus, config, launch,
+   transport/client, the primitive commands). Extra is everything built on
+   top: composite/multi-request commands (a future `until()` — temp
+   breakpoint + `cont()` + clear), "viewers" (planned), ptpython/
+   prompt_toolkit integration (`completion.py`, `highlighting.py`,
+   `keybindings.py`), and any future rich-rendering hook. Audience test:
+   core is for anyone who'd rather compose primitives than reach for a
+   canned convenience — a script, a plugin, a pre-configured debug suite, or
+   an AI agent sketching the three-line equivalent of a composite command
+   itself. Extra is the convenience layer for interactive humans and more
+   elaborate tooling — why point 1's `display()` belongs there despite
+   importing nothing ptpython-specific.
+9. **Rendering hook (`pt_repr`-style) — out of scope for now.** Depends on
+   the core/extra split existing as a real package boundary, not just a
+   documented intention. Two directions floated, not chosen between: a
+   duck-typed method returning a plain `list[tuple[str, str]]` (structurally
+   identical to prompt_toolkit's `FormattedText`, no import needed in core),
+   or a `functools.singledispatch`-style renderer registry living entirely
+   in extra.
 
-What is still missing from §3, and matters to §4's guarantee, is that **the wait
-does not match on `threadId`**. In non-stop another thread's breakpoint
-satisfies a `cont()` on this one, and the right cannot prevent that — it
-serializes resumes of one thread, not attribution across threads. This is now
-unambiguous work rather than something coupled to an unbuilt mode: since
-blocking is the caller's choice and not the mode's, the match is required on
-every wait. It does need the async announcement of unmatched stops to land with
-it, or a matched wait would hang with the other thread's stop going nowhere.
+None of this is implemented. Start with points 1 and 2 (self-contained, no
+dependency on the rest); point 3 gates point 7; points 4, 5, and 6 are
+independent of the taxonomy work and of each other.
 
-The cursor rule is unwritten too: `_report_stopped()` assigns
-`current_thread_id` from whatever stopped, which is right for all-stop but not
-for a matched non-stop wait, and it never announces a switch. There is no
-session-wide "last thread to stop" default, so a context that never selected a
-thread gets an error where §2 says it should read through.
+### Decided and built
 
-Non-stop is otherwise half present: the reducer and the thread table handle it,
-but `config.non_stop` does not exist, nothing sets
-`multiThreadsSingleNotification` or pins `steppingResumesAllThreads`, there is no
-mode-switch command, and `cont()` blocks unconditionally with no `wait=`
-argument. `resume()` and `Resumption` are unwritten. pydevd's default is
-non-stop, so that is the mode we currently run in by accident rather than by
-choice.
+Layers 0–4 are built to this document, including the parts this section used to
+list as missing:
 
-`interrupt()` still pauses only the caller's current thread, so it is neither
-stop-the-world nor robust: if that thread is parked in a C-level call (§8) the
-pause lands nowhere and the program keeps running. Ctrl+C also still routes on
-"is this context's thread stopped" rather than "is anything running".
+- `resume()` (`commands/execution.py`) is the single decision point every
+  state-changing command routes through, exactly as §3 describes — the
+  `_internal.py` this section used to point at is gone, folded into
+  `execution.py` directly.
+- The thread control right (`Session.ControlRights`) is built and acquired in
+  `resume()`; `control()` holds the same primitive across a sequence,
+  reentrant per owner. `pause` bypasses it, per §4.
+- **The wait matches on `threadId`.** `_issue()`'s subscription filters on
+  `event.all_threads or event.thread_id == key`, so another thread's stop can
+  no longer satisfy a wait it wasn't meant for.
+- The cursor rule is written and enforced: `report_stop()` moves only the
+  calling context's cursor, to the thread that resolved its own wait, and
+  announces `[Switching to thread N]` only when that thread actually changed —
+  matching §3's all-stop/non-stop split.
+- `config.non_stop` exists, `multiThreadsSingleNotification` is set at attach,
+  `steppingResumesAllThreads` is pinned `False`, and `non_stop()` is a real
+  mode-switch command, a state-changing operation like any other in §4's
+  table: it holds the control right for `None` across the whole
+  precondition-check/flip/re-commit sequence, so it's atomic against a
+  concurrent `resume()` and refuses cleanly when a resume is genuinely in
+  flight.
+- `Resumption` is built: `cont(wait=False)` (and friends) return one, `.wait()`
+  resolves it once and caches the result. There is no separate `wait(tid)`
+  command — `.wait()` on the returned `Resumption` is the whole interface, and
+  that's now a decision rather than an open question.
+- A stop that resolves nobody's wait gets exactly an announcement
+  (`lifecycle._dispatch` → `print_async`) and nothing else — decided, not just
+  observed.
+- `interrupt()` pauses every thread believed running, not just the caller's
+  current one — robust against the tracer-based-pause gap in §8, matching §3.
+- Stdin passthrough (`console.StdinPassthrough`) is wired to whichever call is
+  actually blocked in `Resumption.wait()` — foreground/background falls out of
+  that for free, since a `wait=False` resume gets no passthrough until
+  something waits on it.
+- **Fixed: `non_stop()` re-checks the connection after acquiring the right.**
+  It used to check `SESSION.client is None` only *before* `control.hold(...)`,
+  never after — unlike `resume()`, which re-checks `require_connected()` once
+  it actually holds the key, because whoever held it may have ended the
+  session in the meantime. A disconnect landing while `non_stop()` was queued
+  behind another holder used to reach `SESSION.client.set_debugger_property(...)`
+  on a `None` client (`AttributeError`) instead of a clean `Error(...)`. Now
+  applies the same rule `resume()` already did. Regression test:
+  `test_non_stop_re_checks_the_connection_after_the_right_is_acquired` in
+  `pdvp/test/test_execution.py`.
 
-One ordering constraint the escape hatch has in practice: the right is taken
-before the resume request is sent, so a `pause` racing the send arrives while
-the thread is still suspended and, per §8, emits nothing — leaving the run
-unbounded. Anything automating "resume, then interrupt" must wait for the
-`continued` event, not for the right to change hands.
+One caveat from this section is still real and worth keeping, moved here rather
+than filed as unmigrated: the control right is taken before the resume request
+is sent, so a `pause` racing the send arrives while the thread is still
+suspended and, per §8, emits nothing — leaving the run unbounded. Anything
+automating "resume, then interrupt" must wait for the `continued` event, not
+for the right to change hands.
 
-`pdvp/dap/test/test_dap_client.py` tests the deleted API and is superseded by
-`test_client_events.py`.
+### Fixed: the spawned interpreter
+
+`launch.py`'s `build_spawn_argv()` used to reuse `config.vm_type` — pydevd's
+own `--vm_type` wire concept (`"python"`/`"jython"`), never itself emitted to
+argv — as the literal executable `Popen` execs. That's not a test-only
+problem: `spawn_pydevd()` is the one code path both `run()` and every
+DAP-integration test's `session()` helper share, so a bare `"python"` not
+being on `PATH` (this box only has `python3` — not unusual; many distros drop
+the unversioned symlink per PEP 394) broke `run()` itself, not just its tests.
+Fixed by adding `config.python_executable` (`--python`, or `PYTHON_EXECUTABLE`
+in the environment), defaulting to `sys.executable` — the interpreter already
+running us, guaranteed to exist and already absolute — and used only when
+`vm_type` is `PYTHON`; the Jython path is untouched, since `"jython"` is an
+actual launcher binary name in a way a bare `"python"` is not guaranteed to be.
+
+An earlier pass through this section claimed `test_dap_client.py` "runs fine"
+once the executable was fixed — checked more carefully, that was wrong: the
+file tested a fully removed `Client` surface (`wait_for_event()`, dict-style
+response access), which the previous `FileNotFoundError` had been masking
+before the executable existed to even reach that code. It wasn't a duplicate
+of `test_client_events.py` either — that file only exercises the event bus
+(death, matching, family subscriptions), never `evaluate`/`scopes`/`variables`/
+stepping/`pause`/`exception_info`/function breakpoints/`goto`/`completions`/
+etc. Rewritten to the current `Client` API instead of retired; both files now
+pass against a real pydevd and cover disjoint ground.
+
+### Fixed: three commands that crashed on their own success path
+
+Found while writing unit tests for `commands/inspect_.py` and
+`commands/misc.py` (no real pydevd needed — the bug is visible against any
+response shaped like the real one): `exception_info()`, `modules()`, and
+`pydevd_info()` each read the raw response object `SESSION.client.*()`
+returns instead of its `.body`, the way every sibling command in those two
+files does. The real response types (`pdvp/schema/pydevd_schema.py`) are
+`__slots__`-based `BaseSchema` objects with no `.get()`/`.keys()`, so:
+
+- `exception_info()` did `ExceptionInfo(info)` — `ExceptionInfo` is a `dict`
+  subclass, so this raised `TypeError` on every successful request.
+- `modules()` did `ModuleList(result.get("modules", []))` — raised
+  `AttributeError` on every successful request.
+- `pydevd_info()` did `InfoSections(result)` — same `TypeError` as
+  `exception_info()`, same reason.
+
+In each case the `try/except DAPError` around the request covered the
+*failure* path only; the crash was on the success path, which is a worse bug
+than the DAPError-propagation gaps noted above — those degrade a failure into
+a raw exception, these turned three commands into ones that could never
+return a result at all. Fixed by reading `.body` (and, for the two whose body
+itself nests further schema objects — `exceptionId`/`details` on
+`ExceptionInfoResponseBody`, `python`/`platform`/`process`/`pydevd` on
+`PydevdSystemInfoResponseBody` — `.body.to_dict()`, which recurses through
+those refs the way `Client.request()`'s callers elsewhere already rely on).
+`modules()`'s `result.body.modules` is already a plain list of dicts, matching
+how `breakpoints.py` treats the analogous `set_breakpoints()` response, so no
+`.to_dict()` needed there.

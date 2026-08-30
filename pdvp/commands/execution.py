@@ -373,6 +373,14 @@ def non_stop(enable: bool | None = None) -> Status | Error:
     C-level call never suspends, so that spelling would make any program calling
     join() unable to switch modes for its whole life. Use interrupt() to reach
     the precondition.
+
+    A state-changing command like any other (§4), keyed `None` -- the same
+    "every thread" key an all-stop resume already uses -- so the precondition
+    check and the flip are atomic against a concurrent `cont()`/`step()`/etc.
+    Without this, another caller's resume could land between the check and
+    `set_debugger_property()`, producing exactly the hybrid
+    (breakpoints stop one thread, steps resume everything) the two-step
+    set-then-recommit procedure below exists to prevent.
     """
     if enable is None:
         return Status(_mode_name(SESSION.non_stop))
@@ -383,22 +391,32 @@ def non_stop(enable: bool | None = None) -> Status | Error:
         CONFIG.non_stop = enable
         return Status(f"{_mode_name(enable)} (applied at the next run())")
 
-    if SESSION.resume_in_flight:
-        return Error("a resume is in flight (use interrupt(), then try again)")
+    def announce() -> None:
+        print(f"*** waiting for control of {describe_thread(None)}")
 
-    try:
-        SESSION.client.set_debugger_property(multi_threads_single_notification=not enable)
-    except _dap.DAPError as e:
-        return Error(str(e))
+    with SESSION.control.hold(None, announce=announce):
+        # Re-checked after acquiring, not before (same rule as resume()):
+        # whoever held the right may have ended the session while this call
+        # was blocked waiting for it.
+        error = SESSION.require_connected()
+        if error is not None:
+            return error
+        if SESSION.resume_in_flight:
+            return Error("a resume is in flight (use interrupt(), then try again)")
 
-    SESSION.non_stop = enable
-    CONFIG.non_stop = enable
+        try:
+            SESSION.client.set_debugger_property(multi_threads_single_notification=not enable)
+        except _dap.DAPError as e:
+            return Error(str(e))
 
-    # pydevd stamps each breakpoint's suspend policy from the mode when the
-    # breakpoint is installed, so breakpoints set before the flip keep the old
-    # behaviour until they are sent again -- new stops reported one way, old
-    # breakpoints suspending the other.
-    commit_all()
+        SESSION.non_stop = enable
+        CONFIG.non_stop = enable
+
+        # pydevd stamps each breakpoint's suspend policy from the mode when the
+        # breakpoint is installed, so breakpoints set before the flip keep the old
+        # behaviour until they are sent again -- new stops reported one way, old
+        # breakpoints suspending the other.
+        commit_all()
 
     return Status(f"{_mode_name(enable)}")
 
