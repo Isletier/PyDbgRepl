@@ -1029,8 +1029,43 @@ below; what's left:
    canned convenience — a script, a plugin, a pre-configured debug suite, or
    an AI agent sketching the three-line equivalent of a composite command
    itself. Extra is the convenience layer for interactive humans and more
-   elaborate tooling — why `display()` (removed, see below) would have
-   belonged there despite importing nothing ptpython-specific.
+   elaborate tooling — why `display()` (removed) would have belonged there
+   despite importing nothing ptpython-specific.
+
+   By P0 (no caller gets privileged automatic setup), none of this is
+   automatic on import. Extra exposes two explicit, separately-named calls
+   rather than one combined "start" function: `embed()` blocks and drops the
+   caller into ptpython right there, for anyone who wants it regardless of
+   how the process was launched. `install_hook()` sets
+   `sys.__interactivehook__` — the same hook CPython calls right before its
+   own interactive loop, under `-i` or bare `python3` — to embed ptpython
+   instead and exit rather than fall through: the mechanism for "make
+   ptpython the default interpreter" for a whole session (e.g. from a
+   `PYTHONSTARTUP` file), with no pdvp-specific wrapper script required.
+   Both fold in the gdb-style Ctrl+C policy (`interrupt()` on SIGINT instead
+   of cancelling input) as part of the same opt-in, rather than a global
+   handler core installs on everyone's behalf — `interrupt()` itself stays
+   a normal command either way. Consequently `start_eval()`,
+   `CONFIG.interactive`/`--batch`, `CONFIG.ui`, `_enter_repl`,
+   `_embed_ptpython`/`_embed_readline`, and `_sigint_handler` all either
+   move to extra or disappear outright — plain `from pdvp import *` plus
+   `-i` already covers the no-extra case for free, with no injection step
+   needed.
+
+   **Open, not decided: `process_args_envs()`** (CLI/env parsing —
+   `launch.parse_argv`/`scrub_env`). For core: it has no ptpython
+   dependency, and a CLI-launched pre-configured debug suite
+   (`python suite.py --port 5678 script.py`) still fits the audience test's
+   "script, plugin, pre-configured debug suite" wording, not an
+   extra-flavored convenience. Against: CLI-argv-parsing is itself a UI
+   layer over `Config` — a human typing flags at a shell — unlike `launch`'s
+   other core responsibilities (spawning pydevd, sanitizing the
+   environment), which apply no matter how `Config` got populated; a
+   downstream author with their own args processing or purely in-code
+   config has no use for it. It's already opt-in today — `start_eval()`
+   never called it implicitly even before this pass — so nothing forces
+   argv parsing on a programmatic caller either way; the open question is
+   only where it should physically live.
 3. **Rendering hook (`pt_repr`-style) — out of scope for now.** Depends on
    the core/extra split existing as a real package boundary, not just a
    documented intention. Two directions floated, not chosen between: a
