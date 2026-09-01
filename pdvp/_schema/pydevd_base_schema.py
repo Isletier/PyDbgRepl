@@ -1,4 +1,4 @@
-from .pydevd_schema_log import debug_exception
+from pdvp.schema.pydevd_schema_log import debug_exception
 import json
 import itertools
 from functools import partial

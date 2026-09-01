@@ -6,8 +6,8 @@ import subprocess
 
 # Aliased: spawn_pydevd()/build_spawn_argv() take a parameter called `config`,
 # which would otherwise shadow the module.
-from . import config as _config
-from .config import (  # re-exported: callers say launch.LaunchError, launch.VmType, ...
+from pdvp import config as _config
+from pdvp.config import (  # re-exported: callers say launch.LaunchError, launch.VmType, ...
     Config,
     LaunchError,
     LogLevel,
@@ -147,8 +147,16 @@ def build_spawn_argv(config: Config, host: str, port: int) -> list[str]:
     the signature instead of a comment -- there is no port to pass until
     dap.listen() has produced one.
     """
+    # vm_type is pydevd's own --vm_type wire concept, never emitted to argv
+    # (config.py); the executable we actually exec is python_executable,
+    # which only coincides with vm_type's "python" spelling for the common
+    # case and is unrelated to it otherwise -- reusing vm_type.value here for
+    # both was the bug: a bare "python" isn't on PATH on every system this
+    # runs on (this one included), where python_executable's default,
+    # sys.executable, always resolves.
     vm_type = config.vm_type or VmType.PYTHON
-    argv = [vm_type.value, "-m", "pydevd"]
+    executable = config.python_executable if vm_type is VmType.PYTHON else vm_type.value
+    argv = [executable, "-m", "pydevd"]
     argv.extend(OBLIGATORY_RUN_ARGUMENTS)
     argv += ["--client", host, "--port", str(port)]
 

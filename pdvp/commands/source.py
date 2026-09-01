@@ -1,6 +1,6 @@
 """Source listing: list()/l()."""
-from pdvp.model import Error, SourceLines
-from ._internal import _current_location
+from pdvp.model import Error, ErrorKind, SourceLines
+from pdvp.commands.location import current_location
 
 __all__ = ["ls", "l"]
 
@@ -12,15 +12,15 @@ def ls(first: int | None = None, last: int | None = None) -> SourceLines | Error
     centered on that line (like pdb's `list 20`). Both: that range,
     inclusive.
     """
-    path, current_line = _current_location()
+    path, current_line = current_location()
     if path is None:
-        return Error("no current file")
+        return Error("no current file", kind=ErrorKind.NO_CURRENT_FILE)
 
     try:
         with open(path) as f:
             lines = f.readlines()
     except OSError as e:
-        return Error(str(e))
+        return Error(str(e), kind=ErrorKind.SOURCE_UNAVAILABLE)
     total = len(lines)
 
     if first is None and last is None:

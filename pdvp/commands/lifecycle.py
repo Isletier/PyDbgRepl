@@ -1,24 +1,43 @@
-"""Session lifecycle: run, stop, connect, disconnect, terminate, restart."""
+"""Session lifecycle: run, stop, connect, disconnect, terminate, restart.
+
+Also the home of `_dispatch`, the sink the Client is constructed with here.
+Session does the reduction and the publishing; what belongs to the command
+layer is deciding what to do about an outcome nobody is waiting for.
+"""
 import contextlib
 import threading
-import time
 
-from pdvp.commands.breakpoints import commit_all
-
-from .. import dap as _dap
+from pdvp import dap as _dap
+from pdvp import events
 from pdvp import launch
-from ..config import CONFIG
-from ..session import SESSION
-from pdvp.model import Error, Status, StopResult
-from ._internal import (
-    _clear_dap_state,
-    _end_session,
-    _on_dap_disconnect,
-    _stream_output,
-    _wait_for_resume_result,
-)
+from pdvp.config import CONFIG
+from pdvp.console import print_async, pump_output
+from pdvp.session import SESSION
+from pdvp.model import ConnectResult, Error, ErrorKind, PydevdRefused, RunResult, Status, StopResult
+from pdvp.commands.breakpoints import commit_all
+from pdvp.commands.execution import describe_thread, resume
 
 __all__ = ["run", "stop", "connect", "disconnect", "terminate", "restart"]
+
+
+def _dispatch(message) -> None:
+    """The Client's `on_event` sink. Runs on the reader thread."""
+    event = SESSION.reduce(message)
+
+    if isinstance(event, events.Stopped) and not SESSION.stop_is_awaited(event):
+        # Nobody's wait will report this one -- in non-stop it is the normal way
+        # a second thread announces a breakpoint. No location: we are on the
+        # reader thread, which may not issue requests.
+        print_async(f"*** {describe_thread(event.thread_id)} stopped ({event.reason})")
+        return
+
+    if (isinstance(message, _dap.ConnectionClosed)
+            and not message.deliberate
+            and not SESSION.awaiting_resume):
+        # Nobody is blocked in a resume to notice and tear the session down, so
+        # do it here and say so.
+        SESSION.end()
+        print_async("*** connection to pydevd lost")
 
 
 def run(
@@ -27,7 +46,7 @@ def run(
     stdin: str | None = None,
     stdout: str | None = None,
     stderr: str | None = None,
-) -> StopResult | Error:
+) -> RunResult | Error:
     """Launch pydevd against `script` and connect to it, e.g. run("script.py", "--foo", "bar").
 
     If omitted, `script`/`args` fall back to the --file (and trailing args)
@@ -50,10 +69,10 @@ def _run(
     stdin: str | None = None,
     stdout: str | None = None,
     stderr: str | None = None,
-) -> StopResult | Error:
-    prefix_lines = []
+) -> RunResult | Error:
+    killed_previous = False
     if SESSION.client is not None or SESSION.process is not None:
-        prefix_lines.append("killing previous instance")
+        killed_previous = True
         _stop_session()
 
     config = CONFIG
@@ -62,7 +81,7 @@ def _run(
         config.args = list(args)
 
     if config.file is None:
-        return Error("no script given (pass one to run(), or --file at startup)")
+        return Error("no script given (pass one to run(), or --file at startup)", kind=ErrorKind.NO_SCRIPT)
 
     if stdin is not None:
         config.stdin = stdin
@@ -72,7 +91,7 @@ def _run(
         config.stderr = stderr
 
     if SESSION.client is not None:
-        return Error("already connected")
+        return Error("already connected", kind=ErrorKind.ALREADY_CONNECTED)
 
     # The configuration stops being a half-edited draft here: normalize() turns
     # convenience strings into real values and rejects the rest, and
@@ -80,7 +99,7 @@ def _run(
     try:
         launch.normalize(config)
     except launch.LaunchError as e:
-        return Error(str(e))
+        return Error(str(e), kind=ErrorKind.LAUNCH_FAILED)
 
     # Bind before spawning: pydevd takes the address on its command line and
     # dials back into it, so there is no race to wait out and no port to
@@ -92,13 +111,13 @@ def _run(
         try:
             SESSION.process = launch.spawn_pydevd(config, host, port)
         except launch.LaunchError as e:
-            return Error(str(e))
+            return Error(str(e), kind=ErrorKind.LAUNCH_FAILED)
 
-        prefix_lines.append(f"launched pid={SESSION.process.child.pid}")
+        spawned_pid = SESSION.process.child.pid
 
         if SESSION.process.master_fd is not None:
             SESSION.reader_thread = threading.Thread(
-                target=_stream_output, args=(SESSION.process.master_fd,), daemon=True
+                target=pump_output, args=(SESSION.process.master_fd,), daemon=True
             )
             SESSION.reader_thread.start()
 
@@ -109,11 +128,17 @@ def _run(
             # by now the real cause is usually already on the child's status.
             status = SESSION.process.child.poll()
             if status is not None:
-                return Error(f"pydevd exited with status {status} without connecting")
-            return Error(f"pydevd did not connect within {CONFIG.accept_timeout}s")
+                return Error(f"pydevd exited with status {status} without connecting",
+                             kind=ErrorKind.LAUNCH_FAILED)
+            return Error(f"pydevd did not connect within {CONFIG.accept_timeout}s",
+                         kind=ErrorKind.LAUNCH_FAILED)
 
-    prefix_lines.append(f"connected to pydevd on {host}:{port}")
-    return _handshake(_dap.Client(transport), prefix_lines)
+    result = _handshake(_dap.Client(transport, on_event=_dispatch), pid=spawned_pid)
+    if isinstance(result, Error):
+        return result
+    return RunResult(result.event, result.top_frame, connected_to=(host, port),
+                      killed_previous=killed_previous, spawned_pid=spawned_pid,
+                      source=result.source)
 
 
 def _stop_session() -> None:
@@ -125,19 +150,19 @@ def _stop_session() -> None:
         except _dap.DAPError:
             pass
 
-    _end_session()
+    SESSION.end()
 
 
 def stop() -> Status | Error:
     """End the session: the pydevd connection and any spawned process share one lifetime."""
     if SESSION.client is None and SESSION.process is None:
-        return Error("no active session")
+        return Error("no active session", kind=ErrorKind.NO_ACTIVE_SESSION)
 
     _stop_session()
     return Status("session stopped")
 
 
-def connect() -> StopResult | Error:
+def connect() -> ConnectResult | Error:
     """Connect to a remote pydevd DAP server (one we did not spawn ourselves).
 
     Assumes pydevd is already up and listening; for a session started with
@@ -161,72 +186,93 @@ def _check_capabilities(response) -> None:
         print(f"warning: pydevd reports exception filters {names}, expected {_dap.EXCEPTION_BREAKPOINT_FILTERS}")
 
 
-def _connect(prefix_lines: list[str] | None = None) -> StopResult | Error:
+def _connect() -> ConnectResult | Error:
     """Dial a pydevd somebody else started. The local case does not come
     through here -- run() accepts a connection instead of making one."""
-    if prefix_lines is None:
-        prefix_lines = []
-
     if SESSION.client is not None:
-        return Error("already connected")
+        return Error("already connected", kind=ErrorKind.ALREADY_CONNECTED)
 
     host = CONFIG.dap_host
     port = CONFIG.port
 
     transport = _dap.Transport.connect(host, port, CONFIG.connection_timeout, CONFIG.connection_retry)
 
-    prefix_lines.append(f"connected to pydevd on {host}:{port}")
-    return _handshake(_dap.Client(transport), prefix_lines)
+    result = _handshake(_dap.Client(transport, on_event=_dispatch))
+    if isinstance(result, Error):
+        return result
+    return ConnectResult(result.event, result.top_frame, connected_to=(host, port),
+                          source=result.source)
 
 
-def _handshake(client, prefix_lines: list[str]) -> StopResult | Error:
+def _handshake(client, pid: int | None = None) -> StopResult | Error:
     """Everything after the socket exists -- identical whether we dialled or
-    accepted, which is the point of confining the asymmetry to construction."""
-    _check_capabilities(client.initialize())
-    client.attach()
-    client.wait_for_event("initialized", timeout=5)
+    accepted, which is the point of confining the asymmetry to construction.
 
-    client.on_disconnect = _on_dap_disconnect
-    SESSION.client = client
-    SESSION.running = True
+    Returns a bare `StopResult`; `_run()`/`_connect()` wrap it into the
+    richer `RunResult`/`ConnectResult` with what their own half of the work
+    (spawning, dialling) involved.
+    """
+    # Adopting the client also re-arms the bus's ending latch: without that,
+    # the SessionEnded left over from the previous run() would swallow this
+    # session's, and every wait would be unbounded again.
+    SESSION.begin(client, pid=pid)
 
-    commit_all()
+    # `initialized` routinely arrives before the response to the request that
+    # caused it, so arm first and trigger second.
+    with SESSION.bus.subscribe(events.Initialized) as initialized:
+        _check_capabilities(client.initialize())
+        client.attach(
+            # The mode, and the one flag that would otherwise produce neither
+            # mode. steppingResumesAllThreads defaults to True and has no
+            # setDebuggerProperty path, so left alone it gives us breakpoints
+            # that stop one thread and steps that resume everything. Pinning it
+            # costs nothing in all-stop, where every thread is already suspended.
+            stopAllThreadsOnSuspend=not CONFIG.non_stop,
+            steppingResumesAllThreads=False,
+        )
+        if not isinstance(initialized.get(), events.Initialized):
+            SESSION.end()
+            return Error("pydevd went away during the handshake", kind=ErrorKind.HANDSHAKE_FAILED)
 
-    client.configuration_done()
+    SESSION.non_stop = CONFIG.non_stop
+
+    err = commit_all()
+    if err is not None:
+        return err
 
     # configurationDone() resumes the debuggee; block for its first stop
-    # (initial breakpoint) or exit, same as cont()/step() etc.
-    return _wait_for_resume_result(client, prefix="\n".join(prefix_lines))
+    # (initial breakpoint) or exit, same as cont()/step() etc. No thread id --
+    # nothing has stopped yet, so there is nothing to bump.
+    return resume(None, lambda c: c.configuration_done())
 
 
 def disconnect() -> Status | Error:
     """Detach from the pydevd DAP server, leaving the debuggee running. Local or remote."""
     if SESSION.client is None:
-        return Error("not connected")
+        return Error("not connected", kind=ErrorKind.NOT_CONNECTED)
 
     client = SESSION.client
-    client.on_disconnect = None
     try:
         client.disconnect(terminate_debuggee=False)
     except _dap.DAPError:
         pass
     client.close()
-    _clear_dap_state()
+    SESSION.end_connection()
     return Status("disconnected")
 
 
 def terminate() -> Status | Error:
     """Ask pydevd to terminate the debuggee via the DAP terminate request. Local or remote."""
     if SESSION.client is None:
-        return Error("not connected")
+        return Error("not connected", kind=ErrorKind.NOT_CONNECTED)
     try:
         SESSION.client.terminate()
     except _dap.DAPError as e:
-        return Error(str(e))
+        return PydevdRefused(str(e), cause=e)
     return Status("terminate requested")
 
 
-def restart() -> StopResult | Error:
+def restart() -> RunResult | Error:
     """Restart the debuggee: stop() the current session (if any), then run() again."""
     if SESSION.client is not None or SESSION.process is not None:
         stop()

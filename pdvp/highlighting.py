@@ -14,7 +14,7 @@ from pygments.lexer import words
 from pygments.lexers.python import PythonLexer
 from pygments.token import Name
 
-from . import commands as _commands
+from pdvp import commands as _commands
 
 # Subtoken of Name.Builtin so it inherits sane fallback styling from any
 # pygments theme, but gets its own color via STYLE_OVERRIDES below.
