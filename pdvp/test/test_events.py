@@ -11,7 +11,7 @@ Run from the repo root with the venv active:
 import threading
 import time
 
-from .. import events as E
+from pdvp import events as E
 
 
 def _stopped(thread_id: int = 1, reason: str = "breakpoint") -> E.Stopped:

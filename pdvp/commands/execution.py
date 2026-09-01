@@ -18,14 +18,14 @@ is keyed on it, the wait matches on it, and the epoch bump covers it.
 """
 import contextlib
 
-from .. import dap as _dap
-from .. import events
-from ..config import CONFIG
-from ..console import StdinPassthrough
-from ..session import SESSION
+from pdvp import dap as _dap
+from pdvp import events
+from pdvp.config import CONFIG
+from pdvp.console import StdinPassthrough
+from pdvp.session import SESSION
 from pdvp.model import Error, ErrorKind, PDVPError, PydevdRefused, SourceLines, Status, StopResult
-from .breakpoints import commit_all
-from .location import current_location
+from pdvp.commands.breakpoints import commit_all
+from pdvp.commands.location import current_location
 
 __all__ = ["cont", "step", "next", "finish", "interrupt", "jump", "control", "non_stop"]
 

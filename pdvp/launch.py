@@ -6,8 +6,8 @@ import subprocess
 
 # Aliased: spawn_pydevd()/build_spawn_argv() take a parameter called `config`,
 # which would otherwise shadow the module.
-from . import config as _config
-from .config import (  # re-exported: callers say launch.LaunchError, launch.VmType, ...
+from pdvp import config as _config
+from pdvp.config import (  # re-exported: callers say launch.LaunchError, launch.VmType, ...
     Config,
     LaunchError,
     LogLevel,

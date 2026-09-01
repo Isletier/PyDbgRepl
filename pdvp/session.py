@@ -28,15 +28,15 @@ import dataclasses
 import os
 import threading
 
-from . import cursor
-from . import dap
-from . import events
-from . import launch
-from . import model
-from . import source
+from pdvp import cursor
+from pdvp import dap
+from pdvp import events
+from pdvp import launch
+from pdvp import model
+from pdvp import source
 # Cursor state lives with the cursor; re-exported because a FrameHandle is what
 # Session's read guards hand back.
-from .cursor import FrameHandle
+from pdvp.cursor import FrameHandle
 
 
 @dataclasses.dataclass

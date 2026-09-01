@@ -1,6 +1,6 @@
 """Source listing: list()/l()."""
 from pdvp.model import Error, ErrorKind, SourceLines
-from .location import current_location
+from pdvp.commands.location import current_location
 
 __all__ = ["ls", "l"]
 

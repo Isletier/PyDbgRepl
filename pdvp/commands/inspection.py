@@ -1,6 +1,6 @@
 """Inspection: p, locals, globals_, setvar, whatis, exception_info, completions."""
-from .. import dap as _dap
-from ..session import SESSION
+from pdvp import dap as _dap
+from pdvp.session import SESSION
 from pdvp.model import CompletionList, Error, ExceptionInfo, PydevdRefused, Scope, Status
 
 __all__ = [

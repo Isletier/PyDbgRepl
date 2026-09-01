@@ -2,10 +2,10 @@
 import contextlib
 import os
 
-from ... import events, launch
-from ...schema import pydevd_schema as schema
-from ..client import Client, ConnectionClosed
-from ..transport import Transport, listen
+from pdvp import events, launch
+from pdvp.schema import pydevd_schema as schema
+from pdvp.dap.client import Client, ConnectionClosed
+from pdvp.dap.transport import Transport, listen
 
 # Generous next to the ~90ms a real connect takes, but this is a test harness
 # under load, and the failure it guards against (pydevd never dials) is

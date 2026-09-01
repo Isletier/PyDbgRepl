@@ -21,23 +21,23 @@ code.InteractiveConsole) takes over with __main__'s namespace -- unless
 doc/scenario_mode.md.
 """
 
-import atexit
-import code
-import os
-import signal
-import sys
+import atexit as _atexit
+import code as _code
+import os as _os
+import signal as _signal
+import sys as _sys
 
-from . import commands as _commands
-from . import dap as _dap
+from pdvp import commands as _commands
+from pdvp import dap as _dap
 from pdvp import launch
-from .commands import *  # noqa: F401,F403
-from .commands import __all__ as _commands_all
-from .session import SESSION  # noqa: F401
+from pdvp.commands import *  # noqa: F401,F403
+from pdvp.commands import __all__ as _commands_all
+from pdvp.session import SESSION  # noqa: F401
 #: The live configuration. Assign to it directly: `pdvp.CONFIG.port = 5678`.
 #: It lives in the `pdvp.config` module, which is why it is not itself named
 #: `config` -- `pdvp.config` is that module. At the prompt it *is* called
 #: `config`, because start_eval() injects it into __main__ under that name.
-from .config import CONFIG
+from pdvp.config import CONFIG
 
 __all__ = [*_commands_all, "process_args_envs", "start_eval", "CONFIG"]
 
@@ -55,7 +55,7 @@ def process_args_envs(argv: list[str] | None = None) -> None:
     yourself, before or after this call -- later assignments win, and the
     inferior inherits our environment as-is.
     """
-    argv = sys.argv[1:] if argv is None else argv
+    argv = _sys.argv[1:] if argv is None else argv
 
     launch.scrub_env()
 
@@ -80,7 +80,7 @@ def _sigint_handler(signum, frame) -> None:
         except _dap.DAPError:
             pass
         return
-    signal.default_int_handler(signum, frame)
+    _signal.default_int_handler(signum, frame)
 
 
 def _ptpython_enabled() -> bool:
@@ -118,7 +118,7 @@ class _PydevPromptStyle:
 def _configure_ptpython(repl) -> None:
     from prompt_toolkit.styles import merge_styles
 
-    from .highlighting import STYLE_OVERRIDES
+    from pdvp.highlighting import STYLE_OVERRIDES
 
     repl.all_prompt_styles["pydev"] = _PydevPromptStyle()
     repl.prompt_style = "pydev"
@@ -129,9 +129,9 @@ def _embed_ptpython() -> None:
     from prompt_toolkit.patch_stdout import patch_stdout as _patch_stdout
     from ptpython.repl import PythonRepl
 
-    from . import keybindings
-    from .completion import DebuggerCompleter
-    from .highlighting import make_lexer
+    from pdvp import keybindings
+    from pdvp.completion import DebuggerCompleter
+    from pdvp.highlighting import make_lexer
 
     import __main__
     SESSION.ptpython_active = True
@@ -151,10 +151,10 @@ def _embed_ptpython() -> None:
 def _embed_readline() -> None:
     import __main__
 
-    hook = getattr(sys, "__interactivehook__", None)
+    hook = getattr(_sys, "__interactivehook__", None)
     if hook is not None:
         hook()
-    code.InteractiveConsole(vars(__main__)).interact(banner="", exitmsg="")
+    _code.InteractiveConsole(vars(__main__)).interact(banner="", exitmsg="")
 
 
 def _enter_repl() -> None:
@@ -163,7 +163,7 @@ def _enter_repl() -> None:
         _embed_ptpython()
     else:
         _embed_readline()
-    os._exit(0)
+    _os._exit(0)
 
 
 def start_eval() -> None:
@@ -175,7 +175,7 @@ def start_eval() -> None:
     __main__'s namespace, unless the "interactive" option is False (--batch),
     in which case the process just exits.
     """
-    signal.signal(signal.SIGINT, _sigint_handler)
+    _signal.signal(_signal.SIGINT, _sigint_handler)
 
     if CONFIG.file is not None:
         # Mirror the REPL's own repr-echo of run()'s result, since this call

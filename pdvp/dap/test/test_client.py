@@ -26,8 +26,8 @@ import queue
 import threading
 import time
 
-from ...schema import pydevd_schema as schema
-from ..client import Client, ConnectionClosed, ConnectionLost, DAPError, RequestFailed
+from pdvp.schema import pydevd_schema as schema
+from pdvp.dap.client import Client, ConnectionClosed, ConnectionLost, DAPError, RequestFailed
 
 # Every wait here bounds a failure rather than a race -- nothing inside pdvp
 # itself passes a timeout, but a hung test should fail loudly, not hang the

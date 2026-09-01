@@ -13,10 +13,10 @@ Run from the repo root with the venv active:
 """
 import os
 
-from ... import events
-from ...schema import pydevd_schema as schema
-from ..client import DAPError
-from .helpers import attach_and_configure, session
+from pdvp import events
+from pdvp.schema import pydevd_schema as schema
+from pdvp.dap.client import DAPError
+from pdvp.dap.test.helpers import attach_and_configure, session
 
 TARGETS = os.path.join(os.path.dirname(__file__), "targets")
 CALC = os.path.join(TARGETS, "calc.py")

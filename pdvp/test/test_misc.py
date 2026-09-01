@@ -12,10 +12,10 @@ import importlib
 import sys
 
 misc = importlib.import_module("pdvp.commands.misc")
-from .. import dap as _dap
-from ..model import Error, InfoSections, ModuleList
-from ..session import SESSION as _REAL_SESSION
-from ..session import Session
+from pdvp import dap as _dap
+from pdvp.model import Error, InfoSections, ModuleList
+from pdvp.session import SESSION as _REAL_SESSION
+from pdvp.session import Session
 
 # ---------------------------------------------------------------- fakes
 

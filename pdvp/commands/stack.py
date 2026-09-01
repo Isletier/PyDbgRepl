@@ -9,8 +9,8 @@ needs.
 `frame`, `up` and `down` are the exception, and deliberately: they *are* cursor
 navigation, so there is nothing for them to take.
 """
-from .. import cursor as _cursor
-from ..session import SESSION
+from pdvp import cursor as _cursor
+from pdvp.session import SESSION
 from pdvp.model import CursorList, Error, ErrorKind, FrameRef, FrameList, Status, ThreadList
 
 __all__ = ["threads", "thread", "cursors", "bt", "frame", "up", "down"]

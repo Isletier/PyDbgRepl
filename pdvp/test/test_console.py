@@ -31,8 +31,8 @@ import os
 import threading
 import time
 
-from .. import console
-from ..session import SESSION
+from pdvp import console
+from pdvp.session import SESSION
 
 WAIT = 5.0
 

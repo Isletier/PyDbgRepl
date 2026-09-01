@@ -7,15 +7,15 @@ layer is deciding what to do about an outcome nobody is waiting for.
 import contextlib
 import threading
 
-from .. import dap as _dap
-from .. import events
+from pdvp import dap as _dap
+from pdvp import events
 from pdvp import launch
-from ..config import CONFIG
-from ..console import print_async, pump_output
-from ..session import SESSION
+from pdvp.config import CONFIG
+from pdvp.console import print_async, pump_output
+from pdvp.session import SESSION
 from pdvp.model import ConnectResult, Error, ErrorKind, PydevdRefused, RunResult, Status, StopResult
-from .breakpoints import commit_all
-from .execution import describe_thread, resume
+from pdvp.commands.breakpoints import commit_all
+from pdvp.commands.execution import describe_thread, resume
 
 __all__ = ["run", "stop", "connect", "disconnect", "terminate", "restart"]
 

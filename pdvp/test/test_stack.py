@@ -14,9 +14,9 @@ import sys
 import threading
 
 stack = importlib.import_module("pdvp.commands.stack")
-from ..model import CursorList, Error, FrameList, FrameRef, Status, ThreadList
-from ..session import SESSION as _REAL_SESSION
-from ..session import Session
+from pdvp.model import CursorList, Error, FrameList, FrameRef, Status, ThreadList
+from pdvp.session import SESSION as _REAL_SESSION
+from pdvp.session import Session
 
 # ---------------------------------------------------------------- fakes
 

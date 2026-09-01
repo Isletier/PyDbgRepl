@@ -5,9 +5,9 @@ that breakpoint, list and jump commands actually take. Nothing here changes
 state; the round trip it makes is a `stackTrace` on a thread the caller's
 cursor already names.
 """
-from .. import dap as _dap
-from ..config import CONFIG
-from ..session import SESSION
+from pdvp import dap as _dap
+from pdvp.config import CONFIG
+from pdvp.session import SESSION
 from pdvp.model import Error, ErrorKind
 
 

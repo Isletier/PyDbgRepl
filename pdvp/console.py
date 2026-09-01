@@ -23,7 +23,7 @@ import termios
 import threading
 import tty
 
-from .session import SESSION
+from pdvp.session import SESSION
 
 
 def print_async(message: str) -> None:

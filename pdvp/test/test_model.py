@@ -12,7 +12,7 @@ Run from the repo root with the venv active:
 
     python -m pdvp.test.test_model
 """
-from ..model import Error, ErrorKind, PydevdRefused, StaleFrameError, Status
+from pdvp.model import Error, ErrorKind, PydevdRefused, StaleFrameError, Status
 
 
 def test_error_is_falsy_and_reprs_without_quotes() -> None:

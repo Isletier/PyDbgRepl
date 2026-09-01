@@ -14,7 +14,7 @@ from pathlib import Path
 from pdvp.dap.client import Client
 import pdvp.schema.pydevd_schema as schema
 
-from .location import current_file
+from pdvp.commands.location import current_file
 
 
 __all__ = [

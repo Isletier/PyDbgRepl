@@ -42,11 +42,11 @@ import termios
 import threading
 import time
 
-from ... import events
-from ...config import CONFIG
-from ...schema import pydevd_schema as schema
-from ...session import SESSION
-from .helpers import attach_and_configure, session
+from pdvp import events
+from pdvp.config import CONFIG
+from pdvp.schema import pydevd_schema as schema
+from pdvp.session import SESSION
+from pdvp.dap.test.helpers import attach_and_configure, session
 
 # importlib, not `from ...commands import execution`: `commands/__init__.py`
 # does `from .breakpoints import *`, which shadows the *package's*
@@ -56,7 +56,7 @@ execution = importlib.import_module("pdvp.commands.execution")
 lifecycle = importlib.import_module("pdvp.commands.lifecycle")
 bp_cmds = importlib.import_module("pdvp.commands.breakpoints")
 stack = importlib.import_module("pdvp.commands.stack")
-inspect_ = importlib.import_module("pdvp.commands.inspect_")
+inspection = importlib.import_module("pdvp.commands.inspection")
 
 TARGETS = os.path.join(os.path.dirname(__file__), "targets")
 LOOP = os.path.join(TARGETS, "loop.py")
@@ -199,10 +199,10 @@ def test_non_stop_leaves_the_other_thread_running() -> None:
         assert result.reason == "breakpoint", result
         assert result.event.thread_id is not None, result
 
-        first = str(inspect_.p("beta_counter"))
+        first = str(inspection.p("beta_counter"))
         assert not first.startswith("error:"), first
         time.sleep(0.3)
-        second = str(inspect_.p("beta_counter"))
+        second = str(inspection.p("beta_counter"))
         assert first != second, ("beta did not advance while stopped in non-stop mode", first, second)
 
         execution.cont(wait=False).close()

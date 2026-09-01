@@ -1094,7 +1094,7 @@ list as missing:
   `pdvp/test/test_execution.py`.
 - **Removed: `stop_report_lines`/`display()`/`undisplay()`.** The hook list,
   `_show_display()`, and `SESSION.displays` are gone from
-  `commands/execution.py`/`commands/inspect_.py`/`session.py`; `StopResult`
+  `commands/execution.py`/`commands/inspection.py`/`session.py`; `StopResult`
   no longer has a `suffix` field. See point 1 of the output/return-type
   redesign above for why. Not relocated to extra — extra isn't a real
   package boundary yet, and a vestigial `display()` that stores expressions
@@ -1204,7 +1204,7 @@ pass against a real pydevd and cover disjoint ground.
 
 ### Fixed: three commands that crashed on their own success path
 
-Found while writing unit tests for `commands/inspect_.py` and
+Found while writing unit tests for `commands/inspection.py` and
 `commands/misc.py` (no real pydevd needed — the bug is visible against any
 response shaped like the real one): `exception_info()`, `modules()`, and
 `pydevd_info()` each read the raw response object `SESSION.client.*()`

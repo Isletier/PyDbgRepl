@@ -21,10 +21,10 @@ import os
 import tempfile
 from pathlib import Path
 
-from .. import session as _session
-from ..config import CONFIG
-from ..dap import Source
-from ..source import SourceMap
+from pdvp import session as _session
+from pdvp.config import CONFIG
+from pdvp.dap import Source
+from pdvp.source import SourceMap
 
 
 class _Body:

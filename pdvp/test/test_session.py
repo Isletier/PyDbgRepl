@@ -14,12 +14,12 @@ Run from the repo root with the venv active:
 import gc
 import threading
 
-from .. import cursor as cursor_module
-from .. import events as E
-from .. import model
-from ..dap import ConnectionClosed
-from ..model import Error
-from ..session import ControlRights, Session
+from pdvp import cursor as cursor_module
+from pdvp import events as E
+from pdvp import model
+from pdvp.dap import ConnectionClosed
+from pdvp.model import Error
+from pdvp.session import ControlRights, Session
 
 
 class _Message:

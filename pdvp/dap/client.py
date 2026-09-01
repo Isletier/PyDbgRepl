@@ -37,7 +37,7 @@ from typing import Any, Callable
 import pdvp.schema.pydevd_base_schema as base_schema
 import pdvp.schema.pydevd_schema as schema
 
-from .transport import ProtocolError, Transport
+from pdvp.dap.transport import ProtocolError, Transport
 
 # How long close() waits for the reader thread after shutting the socket down.
 # The only timeout in this file, and it bounds teardown rather than a protocol

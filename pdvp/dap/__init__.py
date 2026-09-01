@@ -1,5 +1,5 @@
 """Minimal DAP client for talking to pydevd's --json-dap-http server."""
-from .client import (
+from pdvp.dap.client import (
     Client,
     ConnectionClosed,
     ConnectionLost,
@@ -7,7 +7,7 @@ from .client import (
     Pending,
     RequestFailed,
 )
-from .transport import LISTEN_HOST, ProtocolError, Transport, listen
+from pdvp.dap.transport import LISTEN_HOST, ProtocolError, Transport, listen
 
 from pdvp.schema.pydevd_schema import (
     Breakpoint,

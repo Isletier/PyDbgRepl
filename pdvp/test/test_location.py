@@ -13,10 +13,10 @@ import importlib
 import sys
 
 location = importlib.import_module("pdvp.commands.location")
-from .. import dap as _dap
-from ..model import Error
-from ..session import SESSION as _REAL_SESSION
-from ..session import Session
+from pdvp import dap as _dap
+from pdvp.model import Error
+from pdvp.session import SESSION as _REAL_SESSION
+from pdvp.session import Session
 
 # ---------------------------------------------------------------- fakes
 
@@ -76,7 +76,7 @@ def _new_session_env():
 def _with_config_file(path):
     """Temporarily set CONFIG.file, restoring it afterward -- CONFIG is a
     module-level singleton shared with the rest of the process."""
-    from ..config import CONFIG
+    from pdvp.config import CONFIG
     before = CONFIG.file
     CONFIG.file = path
 

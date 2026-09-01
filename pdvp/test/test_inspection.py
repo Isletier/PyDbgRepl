@@ -1,4 +1,4 @@
-"""Unit tests for `commands/inspect_.py`: p, locals, globals_, setvar, whatis,
+"""Unit tests for `commands/inspection.py`: p, locals, globals_, setvar, whatis,
 exception_info, completions.
 
 No pydevd, no sockets -- same `FakeClient`-plus-`sys.modules`-scan harness as
@@ -14,10 +14,10 @@ Run from the repo root with the venv active:
 import importlib
 import sys
 
-inspect_ = importlib.import_module("pdvp.commands.inspect_")
-from ..model import CompletionList, Error, ExceptionInfo, Scope, Status
-from ..session import SESSION as _REAL_SESSION
-from ..session import Session
+inspection = importlib.import_module("pdvp.commands.inspection")
+from pdvp.model import CompletionList, Error, ExceptionInfo, Scope, Status
+from pdvp.session import SESSION as _REAL_SESSION
+from pdvp.session import Session
 
 # ---------------------------------------------------------------- fakes
 
@@ -169,12 +169,12 @@ _GUARD_SCENARIOS = [
 ]
 
 _FRAME_COMMANDS = [
-    ("p", lambda: inspect_.p("1 + 1")),
-    ("locals", lambda: inspect_.locals()),
-    ("globals_", lambda: inspect_.globals_()),
-    ("setvar", lambda: inspect_.setvar("x", "1")),
-    ("whatis", lambda: inspect_.whatis("1")),
-    ("completions", lambda: inspect_.completions("a", 1)),
+    ("p", lambda: inspection.p("1 + 1")),
+    ("locals", lambda: inspection.locals()),
+    ("globals_", lambda: inspection.globals_()),
+    ("setvar", lambda: inspection.setvar("x", "1")),
+    ("whatis", lambda: inspection.whatis("1")),
+    ("completions", lambda: inspection.completions("a", 1)),
 ]
 
 
@@ -199,7 +199,7 @@ def test_exception_info_reports_the_specific_guard_failure_via_require_stopped()
         session, client, restore = _new_session_env()
         try:
             setup(session, client)
-            result = inspect_.exception_info()
+            result = inspection.exception_info()
             assert isinstance(result, Error), (scenario_name, result)
             assert expected_substring in result, (scenario_name, result)
         finally:
@@ -212,7 +212,7 @@ def test_p_evaluates_in_the_current_frame() -> None:
     session, client, restore = _new_session_env()
     try:
         _stopped_at_a_frame(session, client)
-        result = inspect_.p("1 + 2")
+        result = inspection.p("1 + 2")
         assert isinstance(result, Status) and not isinstance(result, Error), result
         assert result == "3", result
         assert client.calls == ["evaluate"]
@@ -224,7 +224,7 @@ def test_setvar_assigns_and_reports_the_assignment_text() -> None:
     session, client, restore = _new_session_env()
     try:
         _stopped_at_a_frame(session, client)
-        result = inspect_.setvar("x", "5")
+        result = inspection.setvar("x", "5")
         assert isinstance(result, Status) and not isinstance(result, Error), result
         assert result == "x = 5", result
     finally:
@@ -236,7 +236,7 @@ def test_whatis_reports_the_evaluated_type() -> None:
     try:
         _stopped_at_a_frame(session, client)
         client.evaluate_response = _Response(result="3", type="int")
-        result = inspect_.whatis("1 + 2")
+        result = inspection.whatis("1 + 2")
         assert result == "int", result
     finally:
         restore()
@@ -246,11 +246,11 @@ def test_locals_and_globals_read_the_matching_scope() -> None:
     session, client, restore = _new_session_env()
     try:
         _stopped_at_a_frame(session, client)
-        loc = inspect_.locals()
+        loc = inspection.locals()
         assert isinstance(loc, Scope) and not isinstance(loc, Error), loc
         assert loc == [{"name": "a", "value": "1"}], loc
 
-        glb = inspect_.globals_()
+        glb = inspection.globals_()
         assert isinstance(glb, Scope) and not isinstance(glb, Error), glb
         assert glb == [], glb
     finally:
@@ -261,7 +261,7 @@ def test_completions_happy_path_returns_the_targets() -> None:
     session, client, restore = _new_session_env()
     try:
         _stopped_at_a_frame(session, client)
-        result = inspect_.completions("a", 1)
+        result = inspection.completions("a", 1)
         assert isinstance(result, CompletionList) and not isinstance(result, Error), result
         assert len(result) == 2, result
     finally:
@@ -280,14 +280,14 @@ def test_completions_happy_path_returns_the_targets() -> None:
 # happy-path test was added once the fix landed.
 
 def test_exception_info_dap_error_path_still_returns_a_clean_error() -> None:
-    from .. import dap as _dap
-    from ..model import ErrorKind, PydevdRefused
+    from pdvp import dap as _dap
+    from pdvp.model import ErrorKind, PydevdRefused
     session, client, restore = _new_session_env()
     try:
         _stopped_at_a_frame(session, client)
         cause = _dap.DAPError("no exception on this thread")
         client.raise_on["exception_info"] = cause
-        result = inspect_.exception_info()
+        result = inspection.exception_info()
         assert isinstance(result, Error), result
         assert "no exception on this thread" in result, result
         assert isinstance(result, PydevdRefused), result
@@ -301,7 +301,7 @@ def test_exception_info_happy_path_returns_the_wrapped_result() -> None:
     session, client, restore = _new_session_env()
     try:
         _stopped_at_a_frame(session, client)
-        result = inspect_.exception_info()
+        result = inspection.exception_info()
         assert isinstance(result, ExceptionInfo), result
         assert result["exceptionId"] == "ValueError", result
         assert result["description"] == "boom", result

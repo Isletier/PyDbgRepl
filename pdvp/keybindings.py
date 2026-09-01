@@ -12,8 +12,8 @@ from typing import Callable
 def _f5_action() -> object:
     """cont() if a session is active, else run() with the saved context (e.g.
     --file at startup, or a previous run()'s script/args)."""
-    from .session import SESSION
-    from . import commands
+    from pdvp.session import SESSION
+    from pdvp import commands
 
     if SESSION.client is None:
         return commands.run()

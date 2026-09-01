@@ -22,8 +22,8 @@ import pty
 import sys
 import tempfile
 
-from .. import launch
-from ..config import Config, VmType
+from pdvp import launch
+from pdvp.config import Config, VmType
 
 # Stand-ins for a bound listener's address: build_spawn_argv() only ever
 # writes these into argv, never dials them, so any values do.

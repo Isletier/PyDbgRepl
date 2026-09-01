@@ -10,10 +10,10 @@ Run from the repo root with the venv active:
 """
 import dataclasses
 
-from .. import launch
+from pdvp import launch
 # Aliased: several tests use `config` as a local name for a Config instance.
-from .. import config as _config
-from ..config import CONFIG, Config, LaunchError, LogLevel, QtSupport, VmType
+from pdvp import config as _config
+from pdvp.config import CONFIG, Config, LaunchError, LogLevel, QtSupport, VmType
 
 
 # The address pydevd is told to dial back into. Not a config field: run()

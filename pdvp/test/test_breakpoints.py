@@ -18,10 +18,10 @@ Run from the repo root with the venv active:
 """
 import importlib
 
-from .. import dap as _dap
-from .. import model
-from ..config import CONFIG
-from .test_execution import (
+from pdvp import dap as _dap
+from pdvp import model
+from pdvp.config import CONFIG
+from pdvp.test.test_execution import (
     FakeClient,
     _Response,
     _connected,

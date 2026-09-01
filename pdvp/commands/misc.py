@@ -1,6 +1,6 @@
 """Misc / introspection: modules, pydevd_info."""
-from .. import dap as _dap
-from ..session import SESSION
+from pdvp import dap as _dap
+from pdvp.session import SESSION
 from pdvp.model import Error, ErrorKind, InfoSections, ModuleList, PydevdRefused
 
 __all__ = ["modules", "pydevd_info"]

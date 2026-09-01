@@ -42,10 +42,10 @@ import time
 execution = importlib.import_module("pdvp.commands.execution")
 lifecycle = importlib.import_module("pdvp.commands.lifecycle")
 stack = importlib.import_module("pdvp.commands.stack")
-from .. import dap as _dap
-from ..model import Error, ErrorKind, SourceLines, StaleFrameError, Status, StopResult
-from ..session import SESSION as _REAL_SESSION
-from ..session import Session
+from pdvp import dap as _dap
+from pdvp.model import Error, ErrorKind, SourceLines, StaleFrameError, Status, StopResult
+from pdvp.session import SESSION as _REAL_SESSION
+from pdvp.session import Session
 
 # ---------------------------------------------------------------- fakes
 
@@ -554,7 +554,7 @@ def test_non_stop_before_connecting_just_records_the_default() -> None:
     try:
         result = execution.non_stop(True)
         assert isinstance(result, Status) and not isinstance(result, Error), result
-        from ..config import CONFIG
+        from pdvp.config import CONFIG
         before = CONFIG.non_stop
         try:
             assert CONFIG.non_stop is True
