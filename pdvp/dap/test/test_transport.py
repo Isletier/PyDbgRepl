@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-from ..transport import (
+from pdvp.dap.transport import (
     LISTEN_HOST,
     MAX_BODY_SIZE,
     MAX_HEADER_SIZE,

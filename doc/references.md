@@ -1,8 +1,5 @@
 # External references
 
-Background reading behind the design decisions in `doc/io_model.md` and the
-pty/termios handling in `src/commands/_internal.py`.
-
 - W. Richard Stevens, Stephen A. Rago, *Advanced Programming in the UNIX
   Environment*, 3rd Edition (Addison-Wesley, ISBN 0321637739).
   https://raw.githubusercontent.com/zwan074/technical-books/master/Advanced.Programming.in.the.UNIX.Environment.3rd.Edition.0321637739.pdf

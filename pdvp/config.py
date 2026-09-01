@@ -27,6 +27,7 @@ import dataclasses
 import enum
 import functools
 import os
+import sys
 import tempfile
 import types
 import typing
@@ -150,10 +151,25 @@ class Config:
     ppid: int = dataclasses.field(
         default=0,
         metadata=opt(cli="--ppid", spawn="--ppid", emit=Emit.ALWAYS))
-    # pydevd really does spell this one with an underscore.
+    # pydevd really does spell this one with an underscore. This is pydevd's
+    # own --vm_type wire concept ("python" or "jython") and is never emitted
+    # to argv -- no spawn= below -- so it must not be confused with the
+    # executable spawn_pydevd() actually execs; that's python_executable,
+    # right below.
     vm_type: VmType | None = dataclasses.field(
         default=None,
         metadata=opt(cli="--vm_type"))
+    # The interpreter argv[0] actually execs when vm_type is PYTHON (the
+    # common case) -- ours, not pydevd's, and unrelated to vm_type above
+    # despite the two sharing "python" as a value by coincidence. Defaults to
+    # the interpreter already running us: guaranteed to exist and already
+    # resolved to an absolute path, unlike the bare string "python", which
+    # many distros no longer put on PATH at all (this one included -- only
+    # python3 is). Override with --python, or PYTHON_EXECUTABLE in the
+    # environment for a launcher that can't pass CLI flags through.
+    python_executable: str = dataclasses.field(
+        default_factory=lambda: os.environ.get("PYTHON_EXECUTABLE") or sys.executable,
+        metadata=opt(cli="--python"))
     preimport: str | None = dataclasses.field(
         default=None,
         metadata=opt(cli="--preimport", spawn="--preimport"))
@@ -192,6 +208,13 @@ class Config:
     interactive: bool = dataclasses.field(
         default=True,
         metadata=opt(cli="--batch", style=Style.FLAG, invert=True))
+    # Execution mode: all-stop (default) suspends every thread when one stops;
+    # non-stop leaves the others running. Sent as attach arguments, so this is
+    # what the *next* run()/connect() will ask for -- once connected, the mode
+    # is changed with the non_stop() command, which can refuse.
+    non_stop: bool = dataclasses.field(
+        default=False,
+        metadata=opt(cli="--non-stop", style=Style.FLAG))
 
     # -- repl.py-only knobs: neither a flag nor emitted --
     # Per-stream file redirection for the inferior, gdb-style. Each defaults

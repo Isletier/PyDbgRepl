@@ -10,10 +10,10 @@ import subprocess
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 
-from . import commands as _commands
-from . import dap as _dap
-from .config import CONFIG
-from .session import SESSION
+from pdvp import commands as _commands
+from pdvp import dap as _dap
+from pdvp.config import CONFIG
+from pdvp.session import SESSION
 
 # Per-command argument completion kinds, by positional argument index.
 # A bare string (rather than a list) applies to every argument position --
