@@ -24,17 +24,12 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pdvp
-from pdvp import events
-from pdvp.model import StopResult
-from pdvp.session import SESSION
+from pdvp import breakpoint, bt, cont, control, interrupt, run, stop, thread, threads
+from pdvp.core import events
+from pdvp.core.model import StopResult
+from pdvp.core.session import SESSION
 
 TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "targets", "two_threads.py")
-
-pdvp.process_args_envs(["--batch"])
-pdvp.start_eval()
-
-from pdvp.commands import breakpoint, bt, cont, control, interrupt, run, stop, thread, threads  # noqa: E402
 
 
 def drain(subscription) -> list:

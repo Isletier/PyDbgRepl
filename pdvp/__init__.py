@@ -1,193 +1,32 @@
 """pydev-repl: a Python debugger REPL built on pydevd.
 
-Typical wrapper script:
+`pdvp` is the umbrella package: `pdvp.core` is the thin one-request-one-
+response command layer (no ptpython dependency), and `pdvp.extra` is the
+interactive-session convenience layer built on top of it (ptpython
+integration, keybindings, the gdb-style Ctrl+C policy). `pdvp` itself just
+re-exports `pdvp.core`'s flat surface, so `from pdvp import *` already gives
+every command plus `CONFIG`:
 
-    import pdvp as debug
+    import pdvp
 
-    debug.process_args_envs(sys.argv[1:])
+    pdvp.process_args_envs(sys.argv[1:])
 
-    # optional: debug.CONFIG.log_level = "debug"
+    # optional: pdvp.CONFIG.log_level = "debug"
 
-    debug.start_eval()
+    print(pdvp.run())
+    # optional: further scenario lines, e.g. cont(), bt(5), ...
 
-    # optional: plain Python "scenario" lines go here, e.g. cont(), bt(5), ...
+    # optional, needs pdvp.extra (ptpython installed):
+    #   pdvp.extra.embed()          -- block right here
+    #   pdvp.extra.install_hook()   -- make ptpython the `-i` interpreter
 
-start_eval() injects the REPL commands (and CONFIG, under the name `config`)
-into __main__ and returns. Any
-scenario lines after it run as a normal script body. Once the script body
-finishes, an interactive prompt (ptpython, or readline via
-code.InteractiveConsole) takes over with __main__'s namespace -- unless
-`interactive` is False (--batch), in which case the process just exits. See
-doc/scenario_mode.md.
+`pdvp.extra` is not imported here: by design (doc/architecture.md, P0), no
+caller gets privileged automatic setup, and the umbrella importing it would
+make ptpython a hard dependency of plain `import pdvp`. Reach for it
+explicitly: `import pdvp.extra` or `from pdvp.extra import embed`.
 """
 
-import atexit as _atexit
-import code as _code
-import os as _os
-import signal as _signal
-import sys as _sys
+from pdvp.core import *  # noqa: F401,F403
+from pdvp.core import __all__
 
-from pdvp import commands as _commands
-from pdvp import dap as _dap
-from pdvp import launch
-from pdvp.commands import *  # noqa: F401,F403
-from pdvp.commands import __all__ as _commands_all
-from pdvp.session import SESSION  # noqa: F401
-#: The live configuration. Assign to it directly: `pdvp.CONFIG.port = 5678`.
-#: It lives in the `pdvp.config` module, which is why it is not itself named
-#: `config` -- `pdvp.config` is that module. At the prompt it *is* called
-#: `config`, because start_eval() injects it into __main__ under that name.
-from pdvp.config import CONFIG
-
-__all__ = [*_commands_all, "process_args_envs", "start_eval", "CONFIG"]
-
-
-def process_args_envs(argv: list[str] | None = None) -> None:
-    """Populate CONFIG from the launch command line, and tidy the environment.
-
-    Does not start anything, even if --file was given (it is just saved to
-    CONFIG for start_eval()/run() to pick up later).
-
-    Environment handling is deliberately near-zero: pydevd is configured
-    through os.environ like any other program, so the only thing we do is drop
-    inherited debug settings that would otherwise make us adopt another
-    debugger's configuration (launch.ENV_SANITIZE). Assign to os.environ
-    yourself, before or after this call -- later assignments win, and the
-    inferior inherits our environment as-is.
-    """
-    argv = _sys.argv[1:] if argv is None else argv
-
-    launch.scrub_env()
-
-    try:
-        launch.parse_argv(CONFIG, argv)
-    except launch.LaunchError as e:
-        print(f"error: {e}")
-        raise SystemExit(1)
-
-
-def _sigint_handler(signum, frame) -> None:
-    """gdb-style Ctrl+C: pause a running debuggee, otherwise cancel the current input.
-
-    The condition is "anything is running", not "the thread I am sitting on is
-    running": in non-stop a thread this context never selected can be the only
-    one moving, and Ctrl+C is stop-the-world in both modes. At an idle prompt
-    this stays the REPL's line-clear.
-    """
-    if SESSION.client is not None and SESSION.any_running:
-        try:
-            _commands.interrupt()
-        except _dap.DAPError:
-            pass
-        return
-    _signal.default_int_handler(signum, frame)
-
-
-def _ptpython_enabled() -> bool:
-    ui = CONFIG.ui
-    if ui == "readline":
-        return False
-    try:
-        import ptpython  # noqa: F401
-    except ImportError:
-        if ui == "ptpython":
-            print("error: ui='ptpython' requested but ptpython is not installed")
-        return False
-    return True
-
-
-class _PydevPromptStyle:
-    """ptpython PromptStyle showing the session state, e.g. "(paused) >>> "."""
-
-    def in_prompt(self):
-        if SESSION.client is None:
-            status = "disconnected"
-        elif SESSION.any_running:
-            status = "running"
-        else:
-            status = "paused"
-        return [("class:pygments.comment", f"({status}) "), ("class:prompt", ">>> ")]
-
-    def in2_prompt(self, width: int):
-        return [("class:prompt.dots", "...".rjust(width))]
-
-    def out_prompt(self):
-        return []
-
-
-def _configure_ptpython(repl) -> None:
-    from prompt_toolkit.styles import merge_styles
-
-    from pdvp.highlighting import STYLE_OVERRIDES
-
-    repl.all_prompt_styles["pydev"] = _PydevPromptStyle()
-    repl.prompt_style = "pydev"
-    repl._current_style = merge_styles([repl._current_style, STYLE_OVERRIDES])
-
-
-def _embed_ptpython() -> None:
-    from prompt_toolkit.patch_stdout import patch_stdout as _patch_stdout
-    from ptpython.repl import PythonRepl
-
-    from pdvp import keybindings
-    from pdvp.completion import DebuggerCompleter
-    from pdvp.highlighting import make_lexer
-
-    import __main__
-    SESSION.ptpython_active = True
-
-    def get_globals():
-        return vars(__main__)
-
-    repl = PythonRepl(get_globals=get_globals, get_locals=get_globals, _lexer=make_lexer())
-    repl.completer = DebuggerCompleter(repl.completer)
-    _configure_ptpython(repl)
-    keybindings.install(repl)
-
-    with _patch_stdout():
-        repl.run()
-
-
-def _embed_readline() -> None:
-    import __main__
-
-    hook = getattr(_sys, "__interactivehook__", None)
-    if hook is not None:
-        hook()
-    _code.InteractiveConsole(vars(__main__)).interact(banner="", exitmsg="")
-
-
-def _enter_repl() -> None:
-    """Drop into the interactive prompt. Registered with atexit by start_eval()."""
-    if _ptpython_enabled():
-        _embed_ptpython()
-    else:
-        _embed_readline()
-    _os._exit(0)
-
-
-def start_eval() -> None:
-    """Make REPL commands available and run the inferior first if --file was given.
-
-    Injects the commands into __main__, then returns -- any further lines in
-    the wrapper script run as a normal "scenario". Once the script body
-    finishes, an interactive prompt (ptpython, or readline) takes over with
-    __main__'s namespace, unless the "interactive" option is False (--batch),
-    in which case the process just exits.
-    """
-    _signal.signal(_signal.SIGINT, _sigint_handler)
-
-    if CONFIG.file is not None:
-        # Mirror the REPL's own repr-echo of run()'s result, since this call
-        # happens before the prompt (and its repl-echo machinery) exists.
-        #print(repr(_commands.run()))
-        pass
-
-    import __main__
-    for name in _commands_all:
-        setattr(__main__, name, getattr(_commands, name))
-    # so that `config.port = 5678` works at the prompt, not just `pdvp.CONFIG`
-    setattr(__main__, "config", CONFIG)
-
-    if CONFIG.interactive:
-        _enter_repl()
+__all__ = list(__all__)

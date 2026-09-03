@@ -19,8 +19,8 @@ What has to hold for that to be usable:
   4. A breakpoint actually hits, so the connection is real and not just a
      handshake that happens to complete.
 
-Deliberately written against a raw socket rather than pdvp.dap, so it tests
-pydevd rather than our own transport.
+Deliberately written against a raw socket rather than pdvp.core.dap, so it
+tests pydevd rather than our own transport.
 
     python samples/dap_reverse_connect_spike.py
 """

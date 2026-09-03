@@ -16,16 +16,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pdvp
-from pdvp.model import Error
-from pdvp.session import SESSION
+from pdvp import breakpoint, bt, locals, next, run, stop, thread, threads
+from pdvp.core.model import Error
+from pdvp.core.session import SESSION
 
 TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "targets", "two_threads.py")
-
-pdvp.process_args_envs(["--batch"])
-pdvp.start_eval()
-
-from pdvp.commands import breakpoint, bt, locals, next, run, stop, thread, threads  # noqa: E402
 
 breakpoint(TARGET, 16)
 print(run(TARGET))

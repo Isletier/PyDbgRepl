@@ -999,8 +999,21 @@ generic "absent is false" helper gets the second one backwards.
   `.body.to_dict()` flattening — neither piece of the output/return-type
   redesign (see "Decided, not yet built" below) is resolved. Also
   unresolved: a broader audit for exceptions other than `DAPError` escaping
-  the command surface where they shouldn't ("Decided and built" below, the
-  `DAPError`-leak fix entry) — real implementation-time work, not started.
+  the command surface where they shouldn't (the `DAPError`-leak fix already
+  covers that specific case) — real implementation-time work, not started.
+- **`SESSION` has no curated public read-surface.** `pdvp.core.session.SESSION`
+  is a mutation-heavy internal object (control rights, resume-wait
+  bookkeeping, `reduce()`, `begin()`/`end()`) but is also the only way
+  several legitimate read-only needs get met today — connection status
+  (`.client`), current thread (`.current_thread_id`), the raw thread table
+  (`.threads`), and the event bus (`.bus.subscribe(...)`). As of the
+  core/extra split, `pdvp.core` no longer re-exports `SESSION` at its top
+  level for this reason — it stays reachable only as
+  `pdvp.core.session.SESSION`, an explicit "reaching into internals" import
+  rather than a blessed global. Not designed yet: a narrower accessor layer
+  (properties or small commands) that exposes just the read-only pieces
+  callers actually reach for, without handing out `.reduce()`/`.begin()`/
+  `.end()` alongside them.
 
 ### Decided, not yet built: the output/return-type redesign
 
@@ -1008,15 +1021,13 @@ A design pass on `model.py`'s result types and the core/extra package split,
 across several conversations — decided, but not all of it implemented yet.
 `Status` (currently just a falsy-aware `str`) is the remaining symptom of
 what started it: ad hoc stringification standing in for real fields. Points
-1, 2, and 5 of the original 9-point list are done — see "Decided and built"
-below; what's left:
+1, 2, and 5 of the original 9-point list are done; what's left:
 
 1. **Exception documentation reframed, not just deprioritized.** Since
-   nothing should raise under normal operation (see "Decided and built"
-   below), `Raises:` isn't the useful thing to document — the useful
-   equivalent is which `Error` *kinds* (`model.ErrorKind`, now built — see
-   "Decided and built") a command can return: `Returns Error(kind=...)
-   when:` instead of `Raises:`.
+   nothing should raise under normal operation (already true in the current
+   code), `Raises:` isn't the useful thing to document — the useful
+   equivalent is which `Error` *kinds* (`model.ErrorKind`, already built) a
+   command can return: `Returns Error(kind=...) when:` instead of `Raises:`.
 2. **Core/extra split — by compositeness, not by ptpython dependency.**
    Core is the thin one-request-one-response layer plus the machinery that
    supports it (session, cursor, control rights, event bus, config, launch,
@@ -1052,9 +1063,9 @@ below; what's left:
    `-i` already covers the no-extra case for free, with no injection step
    needed.
 
-   **Open, not decided: `process_args_envs()`** (CLI/env parsing —
-   `launch.parse_argv`/`scrub_env`). For core: it has no ptpython
-   dependency, and a CLI-launched pre-configured debug suite
+   **`process_args_envs()` stays in core, for now** (CLI/env parsing —
+   `launch.parse_argv`/`scrub_env`). It has no ptpython dependency, and a
+   CLI-launched pre-configured debug suite
    (`python suite.py --port 5678 script.py`) still fits the audience test's
    "script, plugin, pre-configured debug suite" wording, not an
    extra-flavored convenience. Against: CLI-argv-parsing is itself a UI
@@ -1064,8 +1075,8 @@ below; what's left:
    downstream author with their own args processing or purely in-code
    config has no use for it. It's already opt-in today — `start_eval()`
    never called it implicitly even before this pass — so nothing forces
-   argv parsing on a programmatic caller either way; the open question is
-   only where it should physically live.
+   argv parsing on a programmatic caller either way. Not revisited unless
+   something concrete argues for moving it.
 3. **Rendering hook (`pt_repr`-style) — out of scope for now.** Depends on
    the core/extra split existing as a real package boundary, not just a
    documented intention. Two directions floated, not chosen between: a

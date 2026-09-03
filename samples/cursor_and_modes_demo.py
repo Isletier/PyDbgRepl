@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pdvp
 from pdvp import CONFIG
+from pdvp.core.session import SESSION
 
 TARGET = "samples/targets/two_threads.py"
 
@@ -33,15 +34,12 @@ def _run_state() -> str:
     """Which threads pydevd actually parked -- the difference between the modes."""
     return ", ".join(
         f"{t.name or t.id}={'stopped' if t.stopped else 'running'}"
-        for t in sorted(pdvp.SESSION.threads, key=lambda t: t.id))
+        for t in sorted(SESSION.threads, key=lambda t: t.id))
 
 
 def main() -> int:
     pdvp.process_args_envs([])
-    CONFIG.interactive = False
     CONFIG.non_stop = False             # start in all-stop
-
-    pdvp.start_eval()
 
     show("breakpoint", pdvp.breakpoint(TARGET, 16))
 
@@ -58,7 +56,7 @@ def main() -> int:
     # A second caller has its own cursor and never sees ours.
     seen = {}
     worker = threading.Thread(
-        target=lambda: seen.update(thread=pdvp.SESSION.current_thread_id))
+        target=lambda: seen.update(thread=SESSION.current_thread_id))
     worker.start()
     worker.join()
     print(f"\n--- worker read thread {seen['thread']} (the session default)")

@@ -9,11 +9,19 @@ description = "Python REPL exposing debugger commands (run, step, ...) backed by
 requires-python = ">=3.10"
 dependencies = [
     "pydevd>=3.0",
-    "prompt-toolkit>=3.0",
 ]
 
 [project.optional-dependencies]
-ptpython = ["ptpython>=3.0"]
+# pdvp.extra: ptpython integration. Pulls in prompt_toolkit and pygments
+# transitively -- pdvp.core needs neither.
+extra = ["ptpython>=3.0"]
 
 [tool.setuptools]
-packages = ["pdvp"]
+packages = [
+    "pdvp",
+    "pdvp.core",
+    "pdvp.core.commands",
+    "pdvp.core.dap",
+    "pdvp.core.schema",
+    "pdvp.extra",
+]

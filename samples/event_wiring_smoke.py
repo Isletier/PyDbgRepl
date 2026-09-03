@@ -11,16 +11,11 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pdvp
-from pdvp import events
-from pdvp.session import SESSION
+from pdvp import breakpoint, cont, next, run, stop
+from pdvp.core import events
+from pdvp.core.session import SESSION
 
 TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "targets", "sleep_sum.py")
-
-pdvp.process_args_envs(["--batch"])
-pdvp.start_eval()
-
-from pdvp.commands import breakpoint, cont, next, run, stop  # noqa: E402
 
 
 def cycle(label: str) -> None:

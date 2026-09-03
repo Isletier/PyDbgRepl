@@ -13,15 +13,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pdvp
-from pdvp.session import SESSION
+from pdvp import breakpoint, cont, disconnect, run, stop
+from pdvp.core.session import SESSION
 
 TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "targets", "sleep_sum.py")
-
-pdvp.process_args_envs(["--batch"])
-pdvp.start_eval()
-
-from pdvp.commands import breakpoint, cont, disconnect, run, stop  # noqa: E402
 
 breakpoint(TARGET, 4)
 
